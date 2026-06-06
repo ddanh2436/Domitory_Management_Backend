@@ -9,12 +9,12 @@ export class User {
   email!: string;
 
   @Prop()
-  mssv?: string; // Bổ sung trường MSSV
+  mssv?: string; 
 
   @Prop({ required: true })
-  passwordHash!: string; 
+  passwordHash!: string;
 
-  @Prop({ required: true, enum: ['STUDENT', 'ADMIN', 'MAINTENANCE'], default: 'STUDENT' })
+  @Prop({ required: true, enum: ['STUDENT', 'ADMIN'], default: 'STUDENT' })
   role!: string;
 
   @Prop({ required: true })
