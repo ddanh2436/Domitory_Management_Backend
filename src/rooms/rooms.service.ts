@@ -1,75 +1,133 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { isValidObjectId, Model } from 'mongoose';
 import { Room, RoomDocument } from './schemas/room.schema';
 import { SearchRoomDto } from './dto/search-room.dto';
+import { CreateRoomDto } from './dto/create-room.dto';
+import { UpdateRoomDto } from './dto/update-room.dto';
+
+export interface PaginatedResult<T> {
+  data: T[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
 
 @Injectable()
 export class RoomsService {
   constructor(@InjectModel(Room.name) private roomModel: Model<RoomDocument>) {}
 
-  // 1. LƯU (Create): Thêm phòng mới hoàn toàn vào MongoDB
-  async create(createRoomDto: any): Promise<Room> {
+  // --- Helper: Validate ObjectId ---
+  private validateObjectId(id: string, context = 'phòng'): void {
+    if (!isValidObjectId(id)) {
+      throw new BadRequestException(
+        `ID "${id}" không đúng định dạng ObjectId`,
+      );
+    }
+  }
+
+  // --- Helper: Xử lý lỗi duplicate key ---
+  private handleDuplicateKeyError(error: any): never {
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      throw new BadRequestException(
+        `Giá trị "${field}" này đã tồn tại trong cơ sở dữ liệu`,
+      );
+    }
+    throw error;
+  }
+
+  // 1. LƯU (Create): Thêm phòng mới vào MongoDB
+  async create(createRoomDto: CreateRoomDto): Promise<Room> {
     try {
       const newRoom = new this.roomModel(createRoomDto);
       return await newRoom.save();
     } catch (error: any) {
-      if (error.code === 11000) {
-        throw new BadRequestException('Tên phòng này đã tồn tại trong cơ sở dữ liệu MongoDB');
-      }
-      throw error;
+      this.handleDuplicateKeyError(error);
     }
   }
 
-  // 2. LẤY VÀ TÌM KIẾM (Read All + Lọc): Truy vấn dữ liệu từ MongoDB theo điều kiện
-  async findAll(query: SearchRoomDto): Promise<Room[]> {
+  async findAll(query: SearchRoomDto): Promise<PaginatedResult<Room>> {
+    const { page = 1, limit = 20, name, building, status, minPrice, maxPrice } = query;
+
     const filter: any = {};
 
-    if (query.name) {
-      filter.name = { $regex: query.name, $options: 'i' }; // Tìm kiếm gần đúng
+    if (name) {
+      filter.name = { $regex: name, $options: 'i' };
     }
-    if (query.building) {
-      filter.building = query.building;
+    if (building) {
+      filter.building = building;
     }
-    if (query.status) {
-      filter.status = query.status;
+    if (status) {
+      filter.status = status;
     }
-    if (query.minPrice || query.maxPrice) {
+    if (minPrice !== undefined || maxPrice !== undefined) {
       filter.price = {};
-      if (query.minPrice) filter.price.$gte = Number(query.minPrice);
-      if (query.maxPrice) filter.price.$lte = Number(query.maxPrice);
+      if (minPrice !== undefined) filter.price.$gte = minPrice;
+      if (maxPrice !== undefined) filter.price.$lte = maxPrice;
     }
 
-    return this.roomModel.find(filter).sort({ building: 1, name: 1 }).exec();
+    const skip = (page - 1) * limit;
+
+    // Chạy song song 2 query để tối ưu performance
+    const [data, total] = await Promise.all([
+      this.roomModel.find(filter).sort({ building: 1, name: 1 }).skip(skip).limit(limit).exec(),
+      this.roomModel.countDocuments(filter).exec(),
+    ]);
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
-  // 3. LẤY CHI TIẾT (Read One): Tìm 1 phòng dựa trên ID
+  // 3. LẤY CHI TIẾT (Read One): Tìm 1 phòng theo ID
   async findOne(id: string): Promise<Room> {
+    this.validateObjectId(id);
+
     const room = await this.roomModel.findById(id).exec();
     if (!room) {
-      throw new NotFoundException(`Không tìm thấy phòng có mã ID ${id} trong hệ thống`);
+      throw new NotFoundException(`Không tìm thấy phòng có ID "${id}"`);
     }
     return room;
   }
 
-  // 4. CẬP NHẬT (Update): Thay đổi thông tin hoặc số lượng người đang ở
-  async update(id: string, updateRoomDto: any): Promise<Room> {
-    const updatedRoom = await this.roomModel
-      .findByIdAndUpdate(id, updateRoomDto, { new: true, runValidators: true })
-      .exec();
-    
-    if (!updatedRoom) {
-      throw new NotFoundException(`Không tìm thấy phòng có ID ${id} để thực hiện cập nhật`);
+  // 4. CẬP NHẬT (Update): Thay đổi thông tin phòng
+  async update(id: string, updateRoomDto: UpdateRoomDto): Promise<Room> {
+    this.validateObjectId(id);
+
+    try {
+      const updatedRoom = await this.roomModel
+        .findByIdAndUpdate(id, updateRoomDto, { new: true, runValidators: true })
+        .exec();
+
+      if (!updatedRoom) {
+        throw new NotFoundException(`Không tìm thấy phòng có ID "${id}" để cập nhật`);
+      }
+      return updatedRoom;
+    } catch (error: any) {
+      // Ném lại NotFoundException nếu đã được throw ở trên
+      if (error instanceof NotFoundException) throw error;
+      this.handleDuplicateKeyError(error);
     }
-    return updatedRoom;
   }
 
-  // 5. XÓA (Delete): Gỡ bỏ hoàn toàn phòng khỏi MongoDB
+  // 5. XÓA (Delete): Gỡ bỏ phòng khỏi MongoDB
   async remove(id: string): Promise<{ message: string }> {
+    this.validateObjectId(id);
+
     const result = await this.roomModel.findByIdAndDelete(id).exec();
     if (!result) {
-      throw new NotFoundException(`Không tìm thấy phòng có ID ${id} để thực hiện thao tác xóa`);
+      throw new NotFoundException(`Không tìm thấy phòng có ID "${id}" để xóa`);
     }
-    return { message: 'Xóa thông tin phòng khỏi cơ sở dữ liệu thành công' };
+    return { message: `Đã xóa phòng "${result.name}" thành công` };
   }
 }

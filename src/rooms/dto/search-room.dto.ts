@@ -1,7 +1,9 @@
 export class SearchRoomDto {
-  name?: string;      
-  building?: string;  
-  status?: string;    
-  minPrice?: number;  
-  maxPrice?: number; 
+  page?: number;
+  limit?: number;
+  name?: string;
+  building?: string;
+  status?: string;
+  minPrice?: number;
+  maxPrice?: number;
 }
