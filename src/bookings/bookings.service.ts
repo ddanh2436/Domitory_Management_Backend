@@ -13,7 +13,7 @@ import { Model, Types, Connection, ClientSession } from 'mongoose';
 import { Booking, BookingDocument } from './schemas/booking.schema';
 import { Room, RoomDocument } from '../rooms/schemas/room.schema';
 import { BookingStatus, RoomStatus } from './bookings.enum';
-
+import { User, UserDocument } from '../users/schemas/user.schema';
 // ─── Response shapes ─────────────────────────────────────────────────────────
 
 export interface CreateBookingResponse {
@@ -39,6 +39,7 @@ export class BookingsService {
   constructor(
     @InjectModel(Booking.name) private bookingModel: Model<BookingDocument>,
     @InjectModel(Room.name) private roomModel: Model<RoomDocument>,
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectConnection() private connection: Connection,
   ) {}
 
@@ -205,13 +206,19 @@ export class BookingsService {
         { session, returnDocument: 'after' },
       );
 
-      if (updatedRoom && updatedRoom.currentOccupancy >= updatedRoom.capacity) {
+     if (updatedRoom && updatedRoom.currentOccupancy >= updatedRoom.capacity) {
         await this.roomModel.findByIdAndUpdate(
           booking.room,
           { status: RoomStatus.FULL },
-          { session },
+          { session, returnDocument: 'after' },
         );
       }
+
+      await this.userModel.findByIdAndUpdate(
+        booking.user,
+        { room: booking.room },
+        { session, returnDocument: 'after' }
+      );
 
       await session.commitTransaction();
       this.logger.log(`Booking approved — bookingId: ${bookingId}`);

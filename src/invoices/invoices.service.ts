@@ -1,0 +1,180 @@
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  ConflictException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types, isValidObjectId } from 'mongoose';
+import { Invoice, InvoiceDocument } from './schemas/invoice.schema';
+import { Room, RoomDocument } from '../rooms/schemas/room.schema';
+import { InvoiceStatus } from './invoices.enum';
+import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { QueryInvoiceDto } from './dto/query-invoice.dto';
+
+export interface PaginatedResult<T> {
+  data: T[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+@Injectable()
+export class InvoicesService {
+  constructor(
+    @InjectModel(Invoice.name) private invoiceModel: Model<InvoiceDocument>,
+    @InjectModel(Room.name) private roomModel: Model<RoomDocument>,
+  ) {}
+
+  // ─── Helper ────────────────────────────────────────────────────────────────
+
+  private validateObjectId(id: string, label = 'ID'): void {
+    if (!isValidObjectId(id)) {
+      throw new BadRequestException(`${label} "${id}" không đúng định dạng`);
+    }
+  }
+
+  // ─── 1. Tạo hóa đơn mới ────────────────────────────────────────────────────
+
+  async createInvoice(dto: CreateInvoiceDto): Promise<Invoice> {
+    const { roomId, month, year, electricityFee, waterFee } = dto;
+
+    this.validateObjectId(roomId, 'roomId');
+
+    // Kiểm tra phòng tồn tại
+    const room = await this.roomModel.findById(roomId).lean();
+    if (!room) {
+      throw new NotFoundException(`Không tìm thấy phòng có ID "${roomId}"`);
+    }
+
+    // Kiểm tra hóa đơn tháng này đã tồn tại chưa
+    const duplicate = await this.invoiceModel.findOne({
+      room: roomId,
+      month,
+      year,
+    });
+    if (duplicate) {
+      throw new ConflictException(
+        `Phòng "${room.name}" đã có hóa đơn tháng ${month}/${year}`,
+      );
+    }
+
+    const totalAmount = room.price + electricityFee + waterFee;
+
+    return this.invoiceModel.create({
+      room: new Types.ObjectId(roomId),
+      month,
+      year,
+      roomFee: room.price,
+      electricityFee,
+      waterFee,
+      totalAmount,
+      status: InvoiceStatus.PENDING,
+    });
+  }
+
+  // ─── 2. Lấy danh sách hóa đơn (có filter + pagination) ─────────────────────
+
+  async getAllInvoices(
+    query: QueryInvoiceDto,
+  ): Promise<PaginatedResult<Invoice>> {
+    const { page = 1, limit = 20, roomId, month, year, status } = query;
+
+    const filter: any = {};
+
+    if (roomId) {
+      this.validateObjectId(roomId, 'roomId');
+      filter.room = new Types.ObjectId(roomId);
+    }
+    if (month) filter.month = month;
+    if (year) filter.year = year;
+    if (status) filter.status = status;
+
+    const skip = (page - 1) * limit;
+
+    const [data, total] = await Promise.all([
+      this.invoiceModel
+        .find(filter)
+        .populate('room', 'name building')
+        .sort({ year: -1, month: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      this.invoiceModel.countDocuments(filter),
+    ]);
+
+    return {
+      data: data as Invoice[],
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  // ─── 3. Lấy toàn bộ hóa đơn của một phòng ──────────────────────────────────
+
+  async getInvoicesByRoom(roomId: string): Promise<Invoice[]> {
+    this.validateObjectId(roomId, 'roomId');
+
+    const roomExists = await this.roomModel.exists({ _id: roomId });
+    if (!roomExists) {
+      throw new NotFoundException(`Không tìm thấy phòng có ID "${roomId}"`);
+    }
+
+    return this.invoiceModel
+      .find({ room: new Types.ObjectId(roomId) })
+      .sort({ year: -1, month: -1 })
+      .lean() as Promise<Invoice[]>;
+  }
+
+  // ─── 4. Xác nhận đã thu tiền ────────────────────────────────────────────────
+
+  async markAsPaid(
+    invoiceId: string,
+  ): Promise<{ message: string; invoice: Invoice }> {
+    this.validateObjectId(invoiceId, 'invoiceId');
+
+    // Lấy invoice hiện tại để kiểm tra trạng thái
+    const invoice = await this.invoiceModel.findById(invoiceId);
+    if (!invoice) {
+      throw new NotFoundException(
+        `Không tìm thấy hóa đơn có ID "${invoiceId}"`,
+      );
+    }
+
+    // Idempotency: tránh update thừa nếu đã PAID
+    if (invoice.status === InvoiceStatus.PAID) {
+      throw new ConflictException('Hóa đơn này đã được thanh toán trước đó');
+    }
+
+    invoice.status = InvoiceStatus.PAID;
+    invoice.paidAt = new Date(); // Ghi nhận thời điểm thanh toán
+    await invoice.save();
+
+    return { message: 'Xác nhận thanh toán thành công', invoice };
+  }
+
+  // ─── 5. Đánh dấu hóa đơn quá hạn (chạy bằng Cron Job) ─────────────────────
+
+  async markOverdueInvoices(): Promise<{ updated: number }> {
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
+
+    // Tất cả hóa đơn PENDING của tháng trước trở về trước → OVERDUE
+    const result = await this.invoiceModel.updateMany(
+      {
+        status: InvoiceStatus.PENDING,
+        $or: [
+          { year: { $lt: currentYear } },
+          { year: currentYear, month: { $lt: currentMonth } },
+        ],
+      },
+      { status: InvoiceStatus.OVERDUE },
+    );
+
+    return { updated: result.modifiedCount };
+  }
+}

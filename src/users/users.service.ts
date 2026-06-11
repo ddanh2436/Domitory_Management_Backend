@@ -7,8 +7,11 @@ import { User, UserDocument } from './schemas/user.schema';
 export class UsersService {
   constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
 
-  async findProfile(userId: string) {
-    const user = await this.userModel.findById(userId).select('-passwordHash');
+ async findProfile(userId: string) {
+    const user = await this.userModel.findById(userId)
+      .select('-passwordHash')
+      .populate('room', 'name building floor capacity price'); 
+      
     if (!user) throw new NotFoundException('Không tìm thấy người dùng');
     return user;
   }
