@@ -26,6 +26,9 @@ export class User {
   @Prop()
   cccd?: string;
 
+  @Prop()
+  avatar?: string;
+
   @Prop({ default: false })
   isTempResident!: boolean;
 

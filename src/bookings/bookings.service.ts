@@ -14,7 +14,7 @@ import { Booking, BookingDocument } from './schemas/booking.schema';
 import { Room, RoomDocument } from '../rooms/schemas/room.schema';
 import { BookingStatus, RoomStatus } from './bookings.enum';
 import { User, UserDocument } from '../users/schemas/user.schema';
-// ─── Response shapes ─────────────────────────────────────────────────────────
+import { ContractsService } from '../contracts/contracts.service'; // 👈 Import Service hợp đồng
 
 export interface CreateBookingResponse {
   message: string;
@@ -41,6 +41,7 @@ export class BookingsService {
     @InjectModel(Room.name) private roomModel: Model<RoomDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectConnection() private connection: Connection,
+    private contractsService: ContractsService, // 👈 Inject Service hợp đồng vào constructor
   ) {}
 
   private assertValidObjectId(id: string, fieldName: string): void {
@@ -80,7 +81,7 @@ export class BookingsService {
         {
           _id: new Types.ObjectId(roomId),
           status: RoomStatus.AVAILABLE,
-          $expr: { $lt: ['$currentOccupancy', '$capacity'] }, // safety net
+          $expr: { $lt: ['$currentOccupancy', '$capacity'] },
         },
         {},
         { session, returnDocument: 'after' },
@@ -112,7 +113,6 @@ export class BookingsService {
         { session },
       );
 
-      // ── 5. Commit ───────────────────────────────────────────────────────
       await session.commitTransaction();
 
       this.logger.log(
@@ -206,7 +206,7 @@ export class BookingsService {
         { session, returnDocument: 'after' },
       );
 
-     if (updatedRoom && updatedRoom.currentOccupancy >= updatedRoom.capacity) {
+      if (updatedRoom && updatedRoom.currentOccupancy >= updatedRoom.capacity) {
         await this.roomModel.findByIdAndUpdate(
           booking.room,
           { status: RoomStatus.FULL },
@@ -219,6 +219,9 @@ export class BookingsService {
         { room: booking.room },
         { session, returnDocument: 'after' }
       );
+
+      // ─── TỰ ĐỘNG SINH HỢP ĐỒNG ĐIỆN TỬ KÈM THEO GIÁ PHÒNG VÀ SESSION TRANSACTION ───
+      await this.contractsService.createContractFromBooking(booking, updatedRoom?.price || 0, session);
 
       await session.commitTransaction();
       this.logger.log(`Booking approved — bookingId: ${bookingId}`);

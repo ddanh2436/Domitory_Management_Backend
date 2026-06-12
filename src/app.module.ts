@@ -6,11 +6,12 @@ import { UsersModule } from './users/users.module';
 import { RoomsModule } from './rooms/rooms.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { InvoicesModule } from './invoices/invoices.module';
+import { ContractsModule } from './contracts/contracts.module'; // 👈 Import Module hợp đồng vào đây
 
 @Module({
   imports: [
     ConfigModule.forRoot({
-      isGlobal: true, 
+      isGlobal: true,
     }),
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
@@ -24,6 +25,7 @@ import { InvoicesModule } from './invoices/invoices.module';
     RoomsModule,
     BookingsModule,
     InvoicesModule,
+    ContractsModule, 
   ],
 })
 export class AppModule {}

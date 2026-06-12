@@ -1,4 +1,4 @@
-import { Controller, Get, Request, UseGuards } from '@nestjs/common';
+import { Controller, Get, Patch, Body, Request, UseGuards } from '@nestjs/common'; // Thêm Patch và Body
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -15,6 +15,12 @@ export class UsersController {
     return this.usersService.findProfile(userId);
   }
 
+  // Thêm endpoint để Admin (và cả Student) có thể tự cập nhật thông tin
+  @Patch('profile')
+  updateProfile(@Request() req: any, @Body() updateData: any) {
+    const userId = req.user.sub;
+    return this.usersService.updateProfile(userId, updateData);
+  }
 
   @Get('students')
   @Roles('ADMIN') 
