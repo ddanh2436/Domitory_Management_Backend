@@ -22,7 +22,7 @@ export class UsersService {
     delete updateData.passwordHash;
     delete updateData.role;
     
-    const updatedUser = await this.userModel.findByIdAndUpdate(userId, updateData, { new: true }).select('-passwordHash');
+    const updatedUser = await this.userModel.findByIdAndUpdate(userId, updateData, { returnDocument: 'after' }).select('-passwordHash');
     if (!updatedUser) throw new NotFoundException('Không tìm thấy người dùng');
     return updatedUser;
   }
