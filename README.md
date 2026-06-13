@@ -31,6 +31,12 @@
 $ npm install
 ```
 
+## Environment setup
+
+Create or update `.env` in this backend folder and set `MONGO_URI` to your MongoDB Atlas connection string.
+
+Use `.env.example` as the local setup template. Do not commit `.env`.
+
 ## Compile and run the project
 
 ```bash
