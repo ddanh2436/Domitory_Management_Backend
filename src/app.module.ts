@@ -7,6 +7,7 @@ import { RoomsModule } from './rooms/rooms.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { ContractsModule } from './contracts/contracts.module'; // 👈 Import Module hợp đồng vào đây
+import { MaintenanceModule } from './maintenance/maintenance.module';
 
 @Module({
   imports: [
@@ -25,7 +26,8 @@ import { ContractsModule } from './contracts/contracts.module'; // 👈 Import M
     RoomsModule,
     BookingsModule,
     InvoicesModule,
-    ContractsModule, 
+    ContractsModule,
+    MaintenanceModule, 
   ],
 })
 export class AppModule {}
