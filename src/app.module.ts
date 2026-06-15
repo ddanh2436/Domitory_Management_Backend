@@ -8,6 +8,7 @@ import { BookingsModule } from './bookings/bookings.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { ContractsModule } from './contracts/contracts.module'; // 👈 Import Module hợp đồng vào đây
 import { MaintenanceModule } from './maintenance/maintenance.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -27,7 +28,8 @@ import { MaintenanceModule } from './maintenance/maintenance.module';
     BookingsModule,
     InvoicesModule,
     ContractsModule,
-    MaintenanceModule, 
+    MaintenanceModule,
+    NotificationsModule, 
   ],
 })
 export class AppModule {}

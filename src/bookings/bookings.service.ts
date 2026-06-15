@@ -15,6 +15,7 @@ import { Room, RoomDocument } from '../rooms/schemas/room.schema';
 import { BookingStatus, RoomStatus } from './bookings.enum';
 import { User, UserDocument } from '../users/schemas/user.schema';
 import { ContractsService } from '../contracts/contracts.service'; // 👈 Import Service hợp đồng
+import { NotificationsService } from '../notifications/notifications.service';
 
 export interface CreateBookingResponse {
   message: string;
@@ -42,6 +43,7 @@ export class BookingsService {
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     @InjectConnection() private connection: Connection,
     private contractsService: ContractsService, // 👈 Inject Service hợp đồng vào constructor
+    private notificationsService: NotificationsService,
   ) {}
 
   private assertValidObjectId(id: string, fieldName: string): void {
@@ -222,6 +224,14 @@ export class BookingsService {
 
       // ─── TỰ ĐỘNG SINH HỢP ĐỒNG ĐIỆN TỬ KÈM THEO GIÁ PHÒNG VÀ SESSION TRANSACTION ───
       await this.contractsService.createContractFromBooking(booking, updatedRoom?.price || 0, session);
+
+      await this.notificationsService.createAndSend({
+        recipient: booking.user.toString(),
+        title: 'Đơn đặt phòng đã được duyệt! 🎉',
+        message: 'Yêu cầu lưu trú của bạn đã được thông qua. Hãy kiểm tra phòng ở hiện tại của mình.',
+        type: 'BOOKING',
+        link: '/student'
+      });
 
       await session.commitTransaction();
       this.logger.log(`Booking approved — bookingId: ${bookingId}`);

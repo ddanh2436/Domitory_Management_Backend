@@ -4,12 +4,14 @@ import { Model, Types, isValidObjectId } from 'mongoose';
 import { Maintenance, MaintenanceDocument } from './schemas/maintenance.schema';
 import { User, UserDocument } from '../users/schemas/user.schema';
 import { MaintenanceStatus } from './maintenance.enum';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Injectable()
 export class MaintenanceService {
   constructor(
     @InjectModel(Maintenance.name) private maintenanceModel: Model<MaintenanceDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
+    private notificationsService: NotificationsService,
   ) {}
 
   // 1. Sinh viên tạo yêu cầu mới
@@ -30,6 +32,21 @@ export class MaintenanceService {
       imageUrl,
       status: MaintenanceStatus.PENDING,
     });
+    
+    try {
+      const admins = await this.userModel.find({ role: 'ADMIN' }).select('_id').lean();
+      for (const admin of admins) {
+        await this.notificationsService.createAndSend({
+          recipient: admin._id.toString(),
+          title: 'Yêu cầu bảo trì mới! 🛠️',
+          message: `Sinh viên ${user.fullName} vừa báo sự cố: "${title}"`,
+          type: 'MAINTENANCE',
+          link: '/admin/maintenance'
+        });
+      }
+    } catch (err) {
+      console.error("Lỗi bắn socket thông báo cho Admin:", err);
+    }
 
     return { message: 'Gửi yêu cầu thành công', request: newRequest };
   }
@@ -55,17 +72,29 @@ export class MaintenanceService {
     if (!isValidObjectId(requestId)) throw new BadRequestException('ID không hợp lệ');
 
     const updateData: any = { status };
+    const request = await this.maintenanceModel.findById(requestId);
+
+    if (!request) throw new NotFoundException('Không tìm thấy yêu cầu này');
+
     if (status === MaintenanceStatus.RESOLVED) {
       updateData.resolvedAt = new Date();
+
+      // Bắn thông báo real-time
+      await this.notificationsService.createAndSend({
+        recipient: request.user.toString(),
+        title: 'Sửa chữa hoàn tất!',
+        message: `Sự cố "${request.title}" của phòng bạn đã được khắc phục xong.`,
+        type: 'MAINTENANCE',
+        link: '/student/maintenance',
+      });
     }
 
-    const request = await this.maintenanceModel.findByIdAndUpdate(
+    const updatedRequest = await this.maintenanceModel.findByIdAndUpdate(
       requestId,
       updateData,
       { returnDocument: 'after' }
     );
 
-    if (!request) throw new NotFoundException('Không tìm thấy yêu cầu này');
-    return { message: 'Cập nhật tiến độ thành công', request };
+    return { message: 'Cập nhật tiến độ thành công', request: updatedRequest };
   }
 }
