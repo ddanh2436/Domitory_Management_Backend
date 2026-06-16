@@ -40,19 +40,19 @@ export class BookingsController {
     return this.bookingsService.cancelBooking(userId, bookingId);
   }
   @Get()
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'DORMITORY_MANAGER', 'FLOOR_MANAGER')
   getAllBookings() {
     return this.bookingsService.getAllBookings();
   }
 
   @Patch(':id/approve')
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'DORMITORY_MANAGER', 'FLOOR_MANAGER')
   approveBooking(@Param('id') bookingId: string) {
     return this.bookingsService.approveBooking(bookingId);
   }
 
   @Patch(':id/reject')
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'DORMITORY_MANAGER', 'FLOOR_MANAGER')
   rejectBooking(@Param('id') bookingId: string) {
     return this.bookingsService.rejectBooking(bookingId);
   }

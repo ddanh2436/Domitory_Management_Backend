@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Body, Request, UseGuards } from '@nestjs/common'; // Thêm Patch và Body
+import { Controller, Get, Patch, Body, Param, Request, UseGuards } from '@nestjs/common'; // Thêm Patch và Body
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -23,8 +23,20 @@ export class UsersController {
   }
 
   @Get('students')
-  @Roles('ADMIN') 
+  @Roles('ADMIN', 'DORMITORY_MANAGER', 'FLOOR_MANAGER') 
   getAllStudents() {
     return this.usersService.findAllStudents();
+  }
+
+  @Get('access-control')
+  @Roles('ADMIN')
+  getAccessControlAccounts() {
+    return this.usersService.findAccessControlAccounts();
+  }
+
+  @Patch(':id/access-control')
+  @Roles('ADMIN')
+  updateAccessControl(@Param('id') userId: string, @Body() updateData: any) {
+    return this.usersService.updateAccessControl(userId, updateData);
   }
 }

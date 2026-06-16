@@ -18,7 +18,7 @@ export class AuthService {
 
   // 1. Hàm Đăng ký thủ công
   async register(registerDto: any) {
-    const { email, mssv, password, fullName, role } = registerDto;
+    const { email, mssv, password, fullName } = registerDto;
 
     const existingUser = await this.userModel.findOne({ email });
     if (existingUser) {
@@ -33,7 +33,7 @@ export class AuthService {
       mssv, 
       passwordHash,
       fullName,
-      role: role || 'STUDENT',
+      role: 'STUDENT',
     });
 
     await newUser.save();
@@ -58,12 +58,16 @@ export class AuthService {
       throw new UnauthorizedException('Sai thông tin đăng nhập (Email/MSSV không tồn tại)');
     }
 
+    if (user.accessStatus === 'LOCKED') {
+      throw new UnauthorizedException('Tài khoản đã bị khóa');
+    }
+
     const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
     if (!isPasswordValid) {
       throw new UnauthorizedException('Sai mật khẩu');
     }
 
-    const payload = { sub: user._id, email: user.email, role: user.role };
+    const payload = { sub: user._id, email: user.email, role: user.role, accessStatus: user.accessStatus ?? 'ACTIVE' };
     return {
       access_token: await this.jwtService.signAsync(payload),
       user: {
@@ -72,6 +76,7 @@ export class AuthService {
         email: user.email,
         fullName: user.fullName,
         role: user.role,
+        accessStatus: user.accessStatus ?? 'ACTIVE',
       }
     };
   }
@@ -106,9 +111,11 @@ export class AuthService {
           role: 'STUDENT',
         });
         await user.save();
+      } else if (user.accessStatus === 'LOCKED') {
+        throw new UnauthorizedException('Tài khoản đã bị khóa');
       }
 
-      const jwtPayload = { sub: user._id, email: user.email, role: user.role };
+      const jwtPayload = { sub: user._id, email: user.email, role: user.role, accessStatus: user.accessStatus ?? 'ACTIVE' };
       return {
         access_token: await this.jwtService.signAsync(jwtPayload),
         user: {
@@ -117,9 +124,13 @@ export class AuthService {
           email: user.email,
           fullName: user.fullName,
           role: user.role,
+          accessStatus: user.accessStatus ?? 'ACTIVE',
         }
       };
     } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
       throw new UnauthorizedException('Xác thực Google thất bại');
     }
   }
