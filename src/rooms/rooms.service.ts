@@ -106,7 +106,7 @@ export class RoomsService {
 
     try {
       const updatedRoom = await this.roomModel
-        .findByIdAndUpdate(id, updateRoomDto, { new: true, runValidators: true })
+        .findByIdAndUpdate(id, updateRoomDto, { returnDocument: 'after', runValidators: true })
         .exec();
 
       if (!updatedRoom) {

@@ -8,9 +8,11 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { Invoice, InvoiceDocument } from './schemas/invoice.schema';
 import { Room, RoomDocument } from '../rooms/schemas/room.schema';
+import { User, UserDocument } from '../users/schemas/user.schema';
 import { InvoiceStatus } from './invoices.enum';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { QueryInvoiceDto } from './dto/query-invoice.dto';
+import { NotificationsService } from '../notifications/notifications.service';
 
 export interface PaginatedResult<T> {
   data: T[];
@@ -25,6 +27,8 @@ export class InvoicesService {
   constructor(
     @InjectModel(Invoice.name) private invoiceModel: Model<InvoiceDocument>,
     @InjectModel(Room.name) private roomModel: Model<RoomDocument>,
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
+  private readonly notificationsService: NotificationsService,
   ) {}
 
   // ─── Helper ────────────────────────────────────────────────────────────────
@@ -176,5 +180,51 @@ export class InvoicesService {
     );
 
     return { updated: result.modifiedCount };
+  }
+
+async mockPay(invoiceId: string) {
+    const invoice = await this.invoiceModel.findById(invoiceId);
+    if (!invoice) throw new NotFoundException('Không tìm thấy hóa đơn');
+    if (invoice.status === 'PAID') throw new BadRequestException('Hóa đơn này đã được thanh toán');
+
+    // 1. Đổi trạng thái thành PAID dưới DB
+    invoice.status = 'PAID';
+    invoice.paidAt = new Date();
+    await invoice.save();
+
+    // 2. TỰ ĐỘNG BẮN THÔNG BÁO REAL-TIME NGAY KHI VỪA ĐỔI TRẠNG THÁI XONG
+    try {
+      // Tìm tên phòng để hiển thị nội dung thông báo cho sinh động
+      const room = await this.roomModel.findById(invoice.room).lean();
+      const roomName = room ? room.name : 'của phòng';
+
+      // Tìm tất cả sinh viên đang thuộc phòng này để bắn thông báo đồng loạt
+      const students = await this.userModel.find({ room: invoice.room }).select('_id').lean();
+      for (const student of students) {
+        await this.notificationsService.createAndSend({
+          recipient: student._id.toString(),
+          title: 'Thanh toán hóa đơn thành công! 💳',
+          message: `Hóa đơn kỳ tháng ${invoice.month}/${invoice.year} đã được gạch nợ thành công.`,
+          type: 'INVOICE',
+          link: '/student/invoices'
+        });
+      }
+
+      // Bắn thông báo cho toàn bộ Admin để biết phòng này đã đóng tiền
+      const admins = await this.userModel.find({ role: 'ADMIN' }).select('_id').lean();
+      for (const admin of admins) {
+        await this.notificationsService.createAndSend({
+          recipient: admin._id.toString(),
+          title: 'Hóa đơn đã được đóng 💰',
+          message: `Phòng ${roomName} đã hoàn tất thanh toán hóa đơn kỳ tháng ${invoice.month}/${invoice.year}.`,
+          type: 'INVOICE',
+          link: '/admin/invoices'
+        });
+      }
+    } catch (err) {
+      console.error("Lỗi gửi thông báo real-time khi thanh toán hóa đơn:", err);
+    }
+
+    return { message: 'Thanh toán thành công!', invoice };
   }
 }

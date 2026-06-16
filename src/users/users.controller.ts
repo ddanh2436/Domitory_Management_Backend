@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Body, Param, Request, UseGuards } from '@nestjs/common'; // Thêm Patch và Body
+import { Controller, Get, Patch, Body, Request, UseGuards, Param, Delete } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -38,5 +38,18 @@ export class UsersController {
   @Roles('ADMIN')
   updateAccessControl(@Param('id') userId: string, @Body() updateData: any) {
     return this.usersService.updateAccessControl(userId, updateData);
+  }
+
+  @Patch(':id')
+  @Roles('ADMIN') 
+  updateUserByAdmin(@Param('id') id: string, @Body() updateData: any) {
+    // Tái sử dụng hàm updateProfile (hoặc hàm update tương ứng trong service của bạn)
+    return this.usersService.updateProfile(id, updateData);
+  }
+  // Thêm chức năng Xóa sinh viên cho Admin
+  @Delete(':id')
+  @Roles('ADMIN')
+  deleteUser(@Param('id') id: string) {
+    return this.usersService.deleteUser(id);
   }
 }

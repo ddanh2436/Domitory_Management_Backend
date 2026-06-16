@@ -14,7 +14,7 @@ import {
 export class UsersService {
   constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
 
- async findProfile(userId: string) {
+  async findProfile(userId: string) {
     const user = await this.userModel.findById(userId)
       .select('-passwordHash')
       .populate('room', 'name building floor capacity price'); 
@@ -23,13 +23,13 @@ export class UsersService {
     return user;
   }
 
-  // 1. Thêm hàm updateProfile
   async updateProfile(userId: string, updateData: Partial<User>) {
-    // Ngăn chặn update các field nhạy cảm như passwordHash hay role từ request
+    // Ngăn chặn update các field nhạy cảm
     delete updateData.passwordHash;
     delete updateData.role;
+    delete updateData.accessStatus;
     
-    const updatedUser = await this.userModel.findByIdAndUpdate(userId, updateData, { new: true }).select('-passwordHash');
+    const updatedUser = await this.userModel.findByIdAndUpdate(userId, updateData, { returnDocument: 'after' }).select('-passwordHash');
     if (!updatedUser) throw new NotFoundException('Không tìm thấy người dùng');
     return updatedUser;
   }
@@ -75,5 +75,13 @@ export class UsersService {
     if (!updatedUser) throw new NotFoundException('Không tìm thấy người dùng');
     return updatedUser;
   }
-}
 
+  // --------------------------------------------------------
+  // HÀM XÓA SINH VIÊN (BẠN ĐANG THIẾU CÁI NÀY NÈ)
+  // --------------------------------------------------------
+  async deleteUser(userId: string) {
+    const deletedUser = await this.userModel.findByIdAndDelete(userId);
+    if (!deletedUser) throw new NotFoundException('Không tìm thấy người dùng để xóa');
+    return deletedUser;
+  }
+}
