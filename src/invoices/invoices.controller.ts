@@ -62,4 +62,10 @@ export class InvoicesController {
   triggerOverdue() {
     return this.invoicesService.markOverdueInvoices();
   }
+
+  @Patch(':id/pay-mock')
+  @Roles('STUDENT')
+  mockPayInvoice(@Param('id') id: string) {
+    return this.invoicesService.mockPay(id);
+  }
 }
