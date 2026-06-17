@@ -23,10 +23,23 @@ export class UsersController {
   }
 
   @Get('students')
-  @Roles('ADMIN') 
+  @Roles('ADMIN', 'DORMITORY_MANAGER', 'FLOOR_MANAGER') 
   getAllStudents() {
     return this.usersService.findAllStudents();
   }
+
+  @Get('access-control')
+  @Roles('ADMIN')
+  getAccessControlAccounts() {
+    return this.usersService.findAccessControlAccounts();
+  }
+
+  @Patch(':id/access-control')
+  @Roles('ADMIN')
+  updateAccessControl(@Param('id') userId: string, @Body() updateData: any) {
+    return this.usersService.updateAccessControl(userId, updateData);
+  }
+
   @Patch(':id')
   @Roles('ADMIN') 
   updateUserByAdmin(@Param('id') id: string, @Body() updateData: any) {

@@ -22,14 +22,14 @@ export class InvoicesController {
 
   // 1. Admin tạo hóa đơn mới
   @Post()
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
   create(@Body() createInvoiceDto: CreateInvoiceDto) {
     return this.invoicesService.createInvoice(createInvoiceDto);
   }
 
   // 2. Admin xem danh sách toàn bộ hóa đơn (Có phân trang & Lọc)
   @Get()
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
   findAll(@Query() query: any) {
     // Ép kiểu từ String trên URL sang Number cho đúng DTO
     const formattedQuery: QueryInvoiceDto = {
@@ -44,21 +44,21 @@ export class InvoicesController {
 
   // 3. Xem danh sách hóa đơn theo ID phòng (Admin hoặc Student đều xem được)
   @Get('room/:roomId')
-  @Roles('ADMIN', 'STUDENT')
+  @Roles('ADMIN', 'DORMITORY_MANAGER', 'FLOOR_MANAGER', 'STUDENT')
   findByRoom(@Param('roomId') roomId: string) {
     return this.invoicesService.getInvoicesByRoom(roomId);
   }
 
   // 4. Admin đánh dấu hóa đơn đã thanh toán
   @Patch(':id/pay')
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
   markAsPaid(@Param('id') id: string) {
     return this.invoicesService.markAsPaid(id);
   }
 
   // 5. Nút thủ công để Admin kích hoạt cập nhật hóa đơn quá hạn (Thay vì đợi Cron job)
   @Post('trigger-overdue')
-  @Roles('ADMIN')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
   triggerOverdue() {
     return this.invoicesService.markOverdueInvoices();
   }

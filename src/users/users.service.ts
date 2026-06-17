@@ -1,7 +1,14 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { User, UserDocument } from './schemas/user.schema';
+import {
+  User,
+  UserAccessStatus,
+  UserDocument,
+  UserRole,
+  USER_ACCESS_STATUSES,
+  USER_ROLES,
+} from './schemas/user.schema';
 
 @Injectable()
 export class UsersService {
@@ -20,17 +27,53 @@ export class UsersService {
     // Ngăn chặn update các field nhạy cảm
     delete updateData.passwordHash;
     delete updateData.role;
+    delete updateData.accessStatus;
     
     const updatedUser = await this.userModel.findByIdAndUpdate(userId, updateData, { returnDocument: 'after' }).select('-passwordHash');
     if (!updatedUser) throw new NotFoundException('Không tìm thấy người dùng');
     return updatedUser;
   }
 
+  // 2. Chỉnh sửa findAllStudents để populate thêm dữ liệu phòng
   async findAllStudents() {
     return this.userModel.find({ role: 'STUDENT' })
       .select('-passwordHash')
-      .populate('room', 'name building') 
+      .populate('room', 'name building') // Lấy thêm tên phòng và toà nhà
       .sort({ createdAt: -1 });
+  }
+
+  async findAccessControlAccounts() {
+    return this.userModel.find()
+      .select('fullName email mssv cccd role accessStatus createdAt')
+      .sort({ createdAt: -1 });
+  }
+
+  async updateAccessControl(
+    userId: string,
+    updateData: { role?: UserRole; accessStatus?: UserAccessStatus },
+  ) {
+    const updatePayload: Partial<Pick<User, 'role' | 'accessStatus'>> = {};
+
+    if (updateData.role) {
+      if (!USER_ROLES.includes(updateData.role)) {
+        throw new BadRequestException('Vai trò tài khoản không hợp lệ');
+      }
+      updatePayload.role = updateData.role;
+    }
+
+    if (updateData.accessStatus) {
+      if (!USER_ACCESS_STATUSES.includes(updateData.accessStatus)) {
+        throw new BadRequestException('Trạng thái truy cập không hợp lệ');
+      }
+      updatePayload.accessStatus = updateData.accessStatus;
+    }
+
+    const updatedUser = await this.userModel
+      .findByIdAndUpdate(userId, updatePayload, { new: true })
+      .select('fullName email mssv cccd role accessStatus createdAt');
+
+    if (!updatedUser) throw new NotFoundException('Không tìm thấy người dùng');
+    return updatedUser;
   }
 
   // --------------------------------------------------------
