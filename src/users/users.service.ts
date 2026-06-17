@@ -69,7 +69,7 @@ export class UsersService {
     }
 
     const updatedUser = await this.userModel
-      .findByIdAndUpdate(userId, updatePayload, { new: true })
+      .findByIdAndUpdate(userId, updatePayload, {returnDocument: 'after'})
       .select('fullName email mssv cccd role accessStatus createdAt');
 
     if (!updatedUser) throw new NotFoundException('Không tìm thấy người dùng');

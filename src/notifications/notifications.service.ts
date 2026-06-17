@@ -37,6 +37,6 @@ export class NotificationsService {
   }
 
   async markAsRead(notifId: string) {
-    return this.notifModel.findByIdAndUpdate(notifId, { isRead: true }, { new: true });
+    return this.notifModel.findByIdAndUpdate(notifId, { isRead: true }, { returnDocument: 'after' });
   }
 }
