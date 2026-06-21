@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Body, Request, UseGuards, Param, Delete } from '@nestjs/common';
+import { Controller, Get, Patch, Body, Request, UseGuards, Param, Delete, BadRequestException } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -46,10 +46,26 @@ export class UsersController {
     // Tái sử dụng hàm updateProfile (hoặc hàm update tương ứng trong service của bạn)
     return this.usersService.updateProfile(id, updateData);
   }
+
   // Thêm chức năng Xóa sinh viên cho Admin
   @Delete(':id')
   @Roles('ADMIN')
   deleteUser(@Param('id') id: string) {
     return this.usersService.deleteUser(id);
+  }
+
+  @Patch(':id/block')
+  @Roles('ADMIN', 'DORMITORY_MANAGER') 
+  async blockUser(@Param('id') id: string, @Body('reason') reason: string) {
+    if (!reason) {
+      throw new BadRequestException('Vui lòng cung cấp lý do khóa tài khoản');
+    }
+    return this.usersService.blockUser(id, reason);
+  }
+
+  @Patch(':id/unblock')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
+  async unblockUser(@Param('id') id: string) {
+    return this.usersService.unblockUser(id);
   }
 }

@@ -30,6 +30,10 @@ export class User {
   @Prop({ required: true, enum: USER_ACCESS_STATUSES, default: 'ACTIVE' })
   accessStatus!: UserAccessStatus;
 
+  // TÍNH NĂNG MỚI: Thêm trường lưu lý do khóa tài khoản
+  @Prop()
+  blockReason?: string;
+
   @Prop({ required: true })
   fullName!: string;
 
