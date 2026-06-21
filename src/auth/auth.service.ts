@@ -58,8 +58,10 @@ export class AuthService {
       throw new UnauthorizedException('Sai thông tin đăng nhập (Email/MSSV không tồn tại)');
     }
 
+    // TÍNH NĂNG MỚI: Báo lỗi kèm theo lý do khóa tài khoản
     if (user.accessStatus === 'LOCKED') {
-      throw new UnauthorizedException('Tài khoản đã bị khóa');
+      const reason = user.blockReason || 'Vi phạm nội quy hoặc chưa thanh toán phí';
+      throw new UnauthorizedException(`Tài khoản đã bị khóa. Lý do: ${reason}`);
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
@@ -112,7 +114,9 @@ export class AuthService {
         });
         await user.save();
       } else if (user.accessStatus === 'LOCKED') {
-        throw new UnauthorizedException('Tài khoản đã bị khóa');
+        // TÍNH NĂNG MỚI: Báo lỗi kèm lý do nếu đăng nhập bằng Google bị chặn
+        const reason = user.blockReason || 'Vi phạm nội quy hoặc chưa thanh toán phí';
+        throw new UnauthorizedException(`Tài khoản đã bị khóa. Lý do: ${reason}`);
       }
 
       const jwtPayload = { sub: user._id, email: user.email, role: user.role, accessStatus: user.accessStatus ?? 'ACTIVE' };

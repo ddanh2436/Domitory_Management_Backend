@@ -34,7 +34,7 @@ export class UsersService {
     return updatedUser;
   }
 
-  // 2. Chỉnh sửa findAllStudents để populate thêm dữ liệu phòng
+  // Chỉnh sửa findAllStudents để populate thêm dữ liệu phòng
   async findAllStudents() {
     return this.userModel.find({ role: 'STUDENT' })
       .select('-passwordHash')
@@ -76,12 +76,36 @@ export class UsersService {
     return updatedUser;
   }
 
-  // --------------------------------------------------------
-  // HÀM XÓA SINH VIÊN (BẠN ĐANG THIẾU CÁI NÀY NÈ)
-  // --------------------------------------------------------
+  // HÀM XÓA SINH VIÊN 
   async deleteUser(userId: string) {
     const deletedUser = await this.userModel.findByIdAndDelete(userId);
     if (!deletedUser) throw new NotFoundException('Không tìm thấy người dùng để xóa');
     return deletedUser;
+  }
+
+  // --------------------------------------------------------
+  // TÍNH NĂNG MỚI: HÀM KHÓA TÀI KHOẢN XUỐNG DATABASE
+  // --------------------------------------------------------
+  async blockUser(id: string, reason: string) {
+    const updatedUser = await this.userModel.findByIdAndUpdate(
+      id,
+      { accessStatus: 'LOCKED', blockReason: reason },
+      { returnDocument: 'after' } // Đảm bảo trả về dữ liệu mới nhất
+    );
+    if (!updatedUser) throw new NotFoundException('Không tìm thấy người dùng');
+    return updatedUser;
+  }
+
+  // --------------------------------------------------------
+  // TÍNH NĂNG MỚI: HÀM MỞ KHÓA TÀI KHOẢN
+  // --------------------------------------------------------
+  async unblockUser(id: string) {
+    const updatedUser = await this.userModel.findByIdAndUpdate(
+      id,
+      { accessStatus: 'ACTIVE', $unset: { blockReason: 1 } }, // Trả về ACTIVE và xóa bỏ lý do
+      { returnDocument: 'after' }
+    );
+    if (!updatedUser) throw new NotFoundException('Không tìm thấy người dùng');
+    return updatedUser;
   }
 }
