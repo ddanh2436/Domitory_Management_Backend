@@ -227,4 +227,25 @@ async mockPay(invoiceId: string) {
 
     return { message: 'Thanh toán thành công!', invoice };
   }
+
+  async getRevenueStats() {
+    const stats = await this.invoiceModel.aggregate([
+      {
+        $group: {
+          _id: { month: '$month', year: '$year' },
+          roomFee: { $sum: '$roomFee' },
+          electricityFee: { $sum: '$electricityFee' },
+          waterFee: { $sum: '$waterFee' },
+        },
+      },
+      { $sort: { '_id.year': 1, '_id.month': 1 } },
+    ]);
+
+    return stats.map(s => ({
+      name: `Tháng ${s._id.month}/${s._id.year}`,
+      'Phòng': s.roomFee,
+      'Điện': s.electricityFee,
+      'Nước': s.waterFee,
+    })).slice(-6); 
+  }
 }
