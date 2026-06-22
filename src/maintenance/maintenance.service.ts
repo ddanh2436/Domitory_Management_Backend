@@ -97,4 +97,26 @@ export class MaintenanceService {
 
     return { message: 'Cập nhật tiến độ thành công', request: updatedRequest };
   }
+
+  async getStatusStats() {
+    const stats = await this.maintenanceModel.aggregate([
+      {
+        $group: {
+          _id: '$status',
+          value: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const statusMap: Record<string, string> = {
+      PENDING: 'Chưa xử lý',
+      IN_PROGRESS: 'Đang sửa chữa',
+      RESOLVED: 'Đã hoàn thành',
+    };
+
+    return stats.map(s => ({
+      name: statusMap[s._id] || s._id,
+      value: s.value,
+    }));
+  }
 }
