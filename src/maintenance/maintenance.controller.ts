@@ -30,6 +30,12 @@ export class MaintenanceController {
     return this.maintenanceService.getAllRequests();
   }
 
+  @Get('stats/status')
+  @Roles('ADMIN')
+  getStatusStats() {
+    return this.maintenanceService.getStatusStats();
+  }
+
   @Patch(':id/status')
   @Roles('ADMIN')
   updateStatus(@Param('id') id: string, @Body('status') status: string) {

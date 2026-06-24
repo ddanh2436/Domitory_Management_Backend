@@ -49,6 +49,12 @@ export class InvoicesController {
     return this.invoicesService.getInvoicesByRoom(roomId);
   }
 
+  @Get('stats/revenue')
+  @Roles('ADMIN')
+  getRevenueStats() {
+    return this.invoicesService.getRevenueStats();
+  }
+
   // 4. Admin đánh dấu hóa đơn đã thanh toán
   @Patch(':id/pay')
   @Roles('ADMIN', 'DORMITORY_MANAGER')
