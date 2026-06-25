@@ -3,10 +3,15 @@ import { Document } from 'mongoose';
 
 export type RoomDocument = Room & Document;
 
-@Schema({ timestamps: true }) // Tự động tạo createdAt và updatedAt
+// BẮT BUỘC: Thêm toJSON và toObject để Mongoose tự động đính kèm các trường ảo khi API trả về kết quả
+@Schema({ 
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+}) 
 export class Room {
   @Prop({ required: true, unique: true, trim: true })
-  name!: string; // Thêm dấu !
+  name!: string;
 
   @Prop({ required: true })
   building!: string;
@@ -35,6 +40,14 @@ export class Room {
 }
 
 export const RoomSchema = SchemaFactory.createForClass(Room);
+
+// TÍNH NĂNG MỚI: Định nghĩa Virtual Populate cho 'occupants'
+// Mongoose sẽ tự động quét bảng 'User', tìm những người có trường 'room' bằng với '_id' của phòng này
+RoomSchema.virtual('occupants', {
+  ref: 'User',          // Tên model được tham chiếu (bảng User)
+  localField: '_id',    // ID của phòng hiện tại
+  foreignField: 'room', // Trường chứa ID phòng ở bên bảng User
+});
 
 RoomSchema.pre('save', function () {
   if (this.currentOccupancy >= this.capacity && this.status !== 'MAINTENANCE') {
