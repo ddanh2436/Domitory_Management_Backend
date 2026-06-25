@@ -52,6 +52,7 @@ export class RoomsService {
     }
   }
 
+  // 2. LẤY TẤT CẢ (Read All)
   async findAll(query: SearchRoomDto): Promise<PaginatedResult<Room>> {
     const { page = 1, limit = 20, name, building, status, minPrice, maxPrice } = query;
 
@@ -76,7 +77,12 @@ export class RoomsService {
 
     // Chạy song song 2 query để tối ưu performance
     const [data, total] = await Promise.all([
-      this.roomModel.find(filter).sort({ building: 1, name: 1 }).skip(skip).limit(limit).exec(),
+      this.roomModel.find(filter)
+        .populate('occupants') // <-- Lấy thông tin chi tiết của occupants thông qua virtual field
+        .sort({ building: 1, name: 1 })
+        .skip(skip)
+        .limit(limit)
+        .exec(),
       this.roomModel.countDocuments(filter).exec(),
     ]);
 
@@ -93,11 +99,26 @@ export class RoomsService {
   async findOne(id: string): Promise<Room> {
     this.validateObjectId(id);
 
-    const room = await this.roomModel.findById(id).exec();
+    // Thêm .populate('occupants') để admin có thể xem được người dùng trong 1 phòng cụ thể
+    const room = await this.roomModel.findById(id).populate('occupants').exec();
     if (!room) {
       throw new NotFoundException(`Không tìm thấy phòng có ID "${id}"`);
     }
     return room;
+  }
+
+  // THÊM MỚI: Dành cho API Get /me của Student (Đã sửa lỗi query ảo)
+  async findRoomByUserId(userId: string): Promise<Room> {
+    // 1. Tìm thông tin User để lấy ID phòng. 
+    // Dùng this.roomModel.db.model('User') để truy vấn trực tiếp bảng User mà không cần import model gây vòng lặp.
+    const user = await this.roomModel.db.model('User').findById(userId).exec();
+
+    if (!user || !user.room) {
+      throw new NotFoundException('Bạn chưa được phân vào phòng nào.');
+    }
+    
+    // 2. Dùng ID phòng của user để lấy dữ liệu phòng (gọi lại hàm findOne để nó tự động populate occupants)
+    return this.findOne(user.room.toString());
   }
 
   // 4. CẬP NHẬT (Update): Thay đổi thông tin phòng
@@ -107,6 +128,7 @@ export class RoomsService {
     try {
       const updatedRoom = await this.roomModel
         .findByIdAndUpdate(id, updateRoomDto, { returnDocument: 'after', runValidators: true })
+        .populate('occupants') // Trả về thông tin occupants đầy đủ sau khi update
         .exec();
 
       if (!updatedRoom) {
@@ -128,6 +150,9 @@ export class RoomsService {
     if (!result) {
       throw new NotFoundException(`Không tìm thấy phòng có ID "${id}" để xóa`);
     }
-    return { message: `Đã xóa phòng "${result.name}" thành công` };
+    
+    // Đảm bảo không bị lỗi nếu schema dùng 'roomNumber' thay vì 'name'
+    const roomIdentifier = (result as any).name || (result as any).roomNumber || id;
+    return { message: `Đã xóa phòng "${roomIdentifier}" thành công` };
   }
 }
