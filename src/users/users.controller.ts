@@ -15,7 +15,6 @@ export class UsersController {
     return this.usersService.findProfile(userId);
   }
 
-  // Thêm endpoint để Admin (và cả Student) có thể tự cập nhật thông tin
   @Patch('profile')
   updateProfile(@Request() req: any, @Body() updateData: any) {
     const userId = req.user.sub;
@@ -40,20 +39,7 @@ export class UsersController {
     return this.usersService.updateAccessControl(userId, updateData);
   }
 
-  @Patch(':id')
-  @Roles('ADMIN') 
-  updateUserByAdmin(@Param('id') id: string, @Body() updateData: any) {
-    // Tái sử dụng hàm updateProfile (hoặc hàm update tương ứng trong service của bạn)
-    return this.usersService.updateProfile(id, updateData);
-  }
-
-  // Thêm chức năng Xóa sinh viên cho Admin
-  @Delete(':id')
-  @Roles('ADMIN')
-  deleteUser(@Param('id') id: string) {
-    return this.usersService.deleteUser(id);
-  }
-
+  // ĐƯA LÊN TRÊN: Các endpoint cụ thể (block, unblock) phải đứng trước endpoint chứa tham số động (:id)
   @Patch(':id/block')
   @Roles('ADMIN', 'DORMITORY_MANAGER') 
   async blockUser(@Param('id') id: string, @Body('reason') reason: string) {
@@ -67,5 +53,18 @@ export class UsersController {
   @Roles('ADMIN', 'DORMITORY_MANAGER')
   async unblockUser(@Param('id') id: string) {
     return this.usersService.unblockUser(id);
+  }
+
+  // ĐƯA XUỐNG DƯỚI: Endpoint chứa tham số động chung (:id)
+  @Patch(':id')
+  @Roles('ADMIN') 
+  updateUserByAdmin(@Param('id') id: string, @Body() updateData: any) {
+    return this.usersService.updateProfile(id, updateData);
+  }
+
+  @Delete(':id')
+  @Roles('ADMIN')
+  deleteUser(@Param('id') id: string) {
+    return this.usersService.deleteUser(id);
   }
 }
