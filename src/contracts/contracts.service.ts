@@ -8,7 +8,6 @@ export class ContractsService {
   constructor(@InjectModel(Contract.name) private contractModel: Model<ContractDocument>) {}
 
   async createContractFromBooking(booking: any, roomPrice: number, session?: ClientSession) {
-    // ... (Giữ nguyên logic của bạn ở đây)
     const contractNumber = `HD-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
     const startDate = new Date();
     const endDate = new Date();
