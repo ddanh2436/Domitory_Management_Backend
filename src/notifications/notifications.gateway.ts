@@ -1,41 +1,66 @@
 import {
-  WebSocketGateway,
-  WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  WebSocketGateway,
+  WebSocketServer,
 } from '@nestjs/websockets';
+import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
 
-@WebSocketGateway({ cors: { origin: '*' } }) // Cho phép Frontend kết nối
+interface NotificationJwtPayload {
+  sub?: string;
+}
+
+@WebSocketGateway({ cors: { origin: '*' } })
 export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
 
-  // Lưu trữ danh sách các user đang online (userId -> socketId)
   private activeUsers = new Map<string, string>();
 
-  handleConnection(client: Socket) {
-    // Khi frontend gọi socket.connect(), nó có thể truyền userId lên
-    const userId = client.handshake.query.userId as string;
-    if (userId) {
+  constructor(private readonly jwtService: JwtService) {}
+
+  private getRoomName(userId: string) {
+    return `user_${userId}`;
+  }
+
+  async handleConnection(client: Socket) {
+    const token = client.handshake.auth?.token;
+
+    if (typeof token !== 'string' || token.trim() === '') {
+      client.disconnect(true);
+      return;
+    }
+
+    try {
+      const payload = await this.jwtService.verifyAsync<NotificationJwtPayload>(token);
+      const userId = payload.sub?.toString();
+
+      if (!userId) {
+        client.disconnect(true);
+        return;
+      }
+
+      client.data.userId = userId;
       this.activeUsers.set(userId, client.id);
-      client.join(userId); // Cho user vào một "phòng" riêng mang tên ID của họ
+      await client.join(this.getRoomName(userId));
+    } catch {
+      client.disconnect(true);
     }
   }
 
   handleDisconnect(client: Socket) {
-    const userId = client.handshake.query.userId as string;
-    if (userId) {
+    const userId = typeof client.data.userId === 'string' ? client.data.userId : undefined;
+
+    if (userId && this.activeUsers.get(userId) === client.id) {
       this.activeUsers.delete(userId);
     }
   }
 
-  // Hàm bắn thông báo đến một user cụ thể
   sendToUser(userId: string, notification: any) {
-    this.server.to(userId).emit('newNotification', notification);
+    this.server.to(this.getRoomName(userId)).emit('newNotification', notification);
   }
 
-  // Hàm bắn thông báo cho toàn bộ hệ thống (dành cho Admin gửi Broadcast)
   sendToAll(notification: any) {
     this.server.emit('newNotification', notification);
   }
