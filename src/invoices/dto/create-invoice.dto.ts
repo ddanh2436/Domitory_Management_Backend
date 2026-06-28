@@ -4,4 +4,5 @@ export class CreateInvoiceDto {
   year!: number;
   electricityFee!: number;
   waterFee!: number;
+  dueDate!: string;
 }

@@ -5,6 +5,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { Invoice, InvoiceDocument } from './schemas/invoice.schema';
 import { Room, RoomDocument } from '../rooms/schemas/room.schema';
@@ -22,13 +23,22 @@ export interface PaginatedResult<T> {
   totalPages: number;
 }
 
+interface OverdueInvoiceSnapshot {
+  _id: Types.ObjectId;
+  room: Types.ObjectId;
+  month: number;
+  year: number;
+  totalAmount: number;
+  dueDate?: Date;
+}
+
 @Injectable()
 export class InvoicesService {
   constructor(
     @InjectModel(Invoice.name) private invoiceModel: Model<InvoiceDocument>,
     @InjectModel(Room.name) private roomModel: Model<RoomDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
-  private readonly notificationsService: NotificationsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   // ─── Helper ────────────────────────────────────────────────────────────────
@@ -39,12 +49,46 @@ export class InvoicesService {
     }
   }
 
+  private parseDueDate(value?: string): Date {
+    if (!value) {
+      throw new BadRequestException('Vui lòng chọn hạn đóng tiền cho hóa đơn');
+    }
+
+    const dueDate = new Date(value);
+    if (Number.isNaN(dueDate.getTime())) {
+      throw new BadRequestException('Hạn đóng tiền không hợp lệ');
+    }
+
+    if (dueDate <= new Date()) {
+      throw new BadRequestException('Hạn đóng tiền phải sau thời điểm hiện tại');
+    }
+
+    return dueDate;
+  }
+
+  private formatCurrency(amount: number): string {
+    return new Intl.NumberFormat('vi-VN', {
+      style: 'currency',
+      currency: 'VND',
+    }).format(amount);
+  }
+
+  private formatDateTime(date?: Date): string {
+    if (!date) return 'hạn đóng tiền đã đặt';
+
+    return new Intl.DateTimeFormat('vi-VN', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    }).format(date);
+  }
+
   // ─── 1. Tạo hóa đơn mới ────────────────────────────────────────────────────
 
   async createInvoice(dto: CreateInvoiceDto): Promise<Invoice> {
-    const { roomId, month, year, electricityFee, waterFee } = dto;
+    const { roomId, month, year, electricityFee, waterFee, dueDate } = dto;
 
     this.validateObjectId(roomId, 'roomId');
+    const parsedDueDate = this.parseDueDate(dueDate);
 
     // Kiểm tra phòng tồn tại
     const room = await this.roomModel.findById(roomId).lean();
@@ -74,6 +118,7 @@ export class InvoicesService {
       electricityFee,
       waterFee,
       totalAmount,
+      dueDate: parsedDueDate,
       status: InvoiceStatus.PENDING,
     });
   }
@@ -162,24 +207,92 @@ export class InvoicesService {
 
   // ─── 5. Đánh dấu hóa đơn quá hạn (chạy bằng Cron Job) ─────────────────────
 
-  async markOverdueInvoices(): Promise<{ updated: number }> {
+  @Cron(CronExpression.EVERY_MINUTE)
+  async handleOverdueInvoicesCron(): Promise<void> {
+    const result = await this.markOverdueInvoices();
+    if (result.updated > 0) {
+      console.log(
+        `Marked ${result.updated} overdue invoice(s), sent ${result.notified} notification(s).`,
+      );
+    }
+  }
+
+  async markOverdueInvoices(): Promise<{ updated: number; notified: number }> {
     const now = new Date();
     const currentMonth = now.getMonth() + 1;
     const currentYear = now.getFullYear();
 
-    // Tất cả hóa đơn PENDING của tháng trước trở về trước → OVERDUE
-    const result = await this.invoiceModel.updateMany(
-      {
+    const candidates = await this.invoiceModel
+      .find({
         status: InvoiceStatus.PENDING,
         $or: [
-          { year: { $lt: currentYear } },
-          { year: currentYear, month: { $lt: currentMonth } },
+          { dueDate: { $lte: now } },
+          {
+            $and: [
+              { $or: [{ dueDate: { $exists: false } }, { dueDate: null }] },
+              {
+                $or: [
+                  { year: { $lt: currentYear } },
+                  { year: currentYear, month: { $lt: currentMonth } },
+                ],
+              },
+            ],
+          },
         ],
-      },
-      { status: InvoiceStatus.OVERDUE },
-    );
+      })
+      .select('_id room month year totalAmount dueDate')
+      .lean();
 
-    return { updated: result.modifiedCount };
+    let updated = 0;
+    let notified = 0;
+
+    for (const invoice of candidates) {
+      const overdueInvoice = await this.invoiceModel
+        .findOneAndUpdate(
+          { _id: invoice._id, status: InvoiceStatus.PENDING },
+          { status: InvoiceStatus.OVERDUE, overdueAt: now },
+          { returnDocument: 'after' },
+        )
+        .lean();
+
+      if (!overdueInvoice) {
+        continue;
+      }
+
+      updated += 1;
+      notified += await this.notifyStudentsAboutOverdueInvoice(overdueInvoice);
+    }
+
+    return { updated, notified };
+  }
+
+  private async notifyStudentsAboutOverdueInvoice(
+    invoice: OverdueInvoiceSnapshot,
+  ): Promise<number> {
+    try {
+      const students = await this.userModel
+        .find({ room: invoice.room, role: 'STUDENT' })
+        .select('_id')
+        .lean();
+
+      const dueDate = invoice.dueDate ? new Date(invoice.dueDate) : undefined;
+      const results = await Promise.allSettled(
+        students.map((student) =>
+          this.notificationsService.createAndSend({
+            recipient: student._id.toString(),
+            title: 'Hóa đơn đã quá hạn thanh toán',
+            message: `Hóa đơn tháng ${invoice.month}/${invoice.year} trị giá ${this.formatCurrency(invoice.totalAmount)} đã hết hạn đóng tiền lúc ${this.formatDateTime(dueDate)}. Vui lòng thanh toán sớm để tránh phát sinh xử lý tiếp theo.`,
+            type: 'INVOICE',
+            link: '/student/invoices',
+          }),
+        ),
+      );
+
+      return results.filter((result) => result.status === 'fulfilled').length;
+    } catch (err) {
+      console.error('Lỗi gửi thông báo hóa đơn quá hạn:', err);
+      return 0;
+    }
   }
 
 async mockPay(invoiceId: string) {
