@@ -14,7 +14,14 @@ export class MaintenanceService {
     private notificationsService: NotificationsService,
   ) {}
 
-  // 1. Sinh viên tạo yêu cầu mới
+  // Trọng số sắp xếp trạng thái (Nhỏ xếp trước)
+  private readonly statusWeight: Record<string, number> = {
+    [MaintenanceStatus.PENDING]: 1,
+    [MaintenanceStatus.IN_PROGRESS]: 2,
+    [MaintenanceStatus.RESOLVED]: 3,
+    [MaintenanceStatus.REJECTED]: 4,
+  };
+
   async createRequest(userId: string, createDto: any) {
     const { title, description, priority, imageUrl } = createDto;
 
@@ -52,20 +59,32 @@ export class MaintenanceService {
   }
 
   async getMyRequests(userId: string) {
-    return this.maintenanceModel
+    const requests = await this.maintenanceModel
       .find({ user: new Types.ObjectId(userId) })
       .populate('room', 'name building')
-      .sort({ createdAt: -1 })
       .lean();
+
+    return requests.sort((a: any, b: any) => {
+      const weightA = this.statusWeight[a.status] || 5;
+      const weightB = this.statusWeight[b.status] || 5;
+      if (weightA !== weightB) return weightA - weightB;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
   }
 
   async getAllRequests() {
-    return this.maintenanceModel
+    const requests = await this.maintenanceModel
       .find()
       .populate('user', 'fullName mssv phone')
       .populate('room', 'name building')
-      .sort({ status: -1, createdAt: -1 }) // Ưu tiên xếp theo trạng thái PENDING lên đầu
       .lean();
+
+    return requests.sort((a: any, b: any) => {
+      const weightA = this.statusWeight[a.status] || 5;
+      const weightB = this.statusWeight[b.status] || 5;
+      if (weightA !== weightB) return weightA - weightB;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
   }
 
   async updateStatus(requestId: string, status: string) {
@@ -79,7 +98,6 @@ export class MaintenanceService {
     if (status === MaintenanceStatus.RESOLVED) {
       updateData.resolvedAt = new Date();
 
-      // Bắn thông báo real-time
       await this.notificationsService.createAndSend({
         recipient: request.user.toString(),
         title: 'Sửa chữa hoàn tất!',
@@ -112,6 +130,7 @@ export class MaintenanceService {
       PENDING: 'Chưa xử lý',
       IN_PROGRESS: 'Đang sửa chữa',
       RESOLVED: 'Đã hoàn thành',
+      REJECTED: 'Từ chối'
     };
 
     return stats.map(s => ({
