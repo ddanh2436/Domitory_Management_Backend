@@ -22,9 +22,17 @@ export class Notification {
   @Prop({ default: false })
   isRead!: boolean;
 
+  @Prop()
+  readAt?: Date;
+
+  @Prop({ type: Date })
+  expireAt?: Date;
+
   // Đường link để khi click vào thông báo sẽ chuyển hướng
   @Prop()
   link?: string;
 }
 
 export const NotificationSchema = SchemaFactory.createForClass(Notification);
+
+NotificationSchema.index({ expireAt: 1 }, { expireAfterSeconds: 0 });
