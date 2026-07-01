@@ -21,4 +21,11 @@ export class AuthController {
   googleLogin(@Body('token') token: string) {
     return this.authService.googleLogin(token);
   }
+
+  // TÍNH NĂNG MỚI: Quên mật khẩu (Sandbox)
+  @HttpCode(HttpStatus.OK)
+  @Post('sandbox-reset-password')
+  resetPasswordSandbox(@Body() body: { email: string; newPassword: string }) {
+    return this.authService.resetPasswordSandbox(body.email, body.newPassword);
+  }
 }
