@@ -1,5 +1,19 @@
-import { Controller, Get, Post, Body, Patch, Param, Req, UseGuards, BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Req,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { MaintenanceService } from './maintenance.service';
+import type { MaintenanceImageFile } from './maintenance.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -11,11 +25,30 @@ export class MaintenanceController {
 
   @Post()
   @Roles('STUDENT')
-  create(@Req() req: any, @Body() createDto: any) {
+  @UseInterceptors(
+    FileInterceptor('image', {
+      limits: { fileSize: 5 * 1024 * 1024 },
+      fileFilter: (_req, file, callback) => {
+        if (!file.mimetype.startsWith('image/')) {
+          return callback(
+            new BadRequestException('Chỉ được đính kèm file ảnh'),
+            false,
+          );
+        }
+
+        callback(null, true);
+      },
+    }),
+  )
+  create(
+    @Req() req: any,
+    @Body() createDto: any,
+    @UploadedFile() image?: MaintenanceImageFile,
+  ) {
     // Trích xuất an toàn, lấy được ID dù JWT payload lưu dưới bất kỳ tên nào
     const userId = req.user?.sub || req.user?.userId || req.user?._id || req.user?.id;
     if (!userId) throw new BadRequestException('Không tìm thấy thông tin xác thực');
-    return this.maintenanceService.createRequest(userId, createDto);
+    return this.maintenanceService.createRequest(userId, createDto, image);
   }
 
   @Get('me')

@@ -28,6 +28,9 @@ export class Invoice {
   @Prop({ required: true, min: 0 })
   totalAmount!: number;
 
+  @Prop()
+  dueDate?: Date;
+
   // Trạng thái hóa đơn
   @Prop({
     required: true,
@@ -38,6 +41,9 @@ export class Invoice {
 
   @Prop()
   paidAt?: Date;
+
+  @Prop()
+  overdueAt?: Date;
 }
 
 export const InvoiceSchema = SchemaFactory.createForClass(Invoice);

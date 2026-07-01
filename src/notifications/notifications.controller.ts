@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Post, Body, Param, Req, UseGuards } from '@nestjs/common'; // Thêm Post, Body
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { NotificationsService } from './notifications.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
@@ -14,9 +14,15 @@ export class NotificationsController {
   }
 
   @Patch(':id/read')
-  markAsRead(@Param('id') id: string) {
-    return this.notificationsService.markAsRead(id);
+  markAsRead(@Param('id') id: string, @Req() req: any) {
+    return this.notificationsService.markAsRead(id, req.user.sub);
   }
+
+  @Delete(':id')
+  deleteNotification(@Param('id') id: string, @Req() req: any) {
+    return this.notificationsService.deleteMyNotification(id, req.user.sub);
+  }
+
   // Endpoint để nhận yêu cầu tạo thông báo từ Frontend
   @Post()
   createNotification(@Body() body: { userId: string; title: string; message: string }) {

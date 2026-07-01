@@ -1,18 +1,53 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
+import { v2 as cloudinary } from 'cloudinary';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { Maintenance, MaintenanceDocument } from './schemas/maintenance.schema';
 import { User, UserDocument } from '../users/schemas/user.schema';
 import { MaintenanceStatus } from './maintenance.enum';
 import { NotificationsService } from '../notifications/notifications.service';
 
+export interface MaintenanceImageFile {
+  buffer: Buffer;
+  mimetype: string;
+  originalname: string;
+  size: number;
+}
+
 @Injectable()
 export class MaintenanceService {
+  private readonly isCloudinaryConfigured: boolean;
+  private readonly cloudinaryFolder: string;
+
   constructor(
     @InjectModel(Maintenance.name) private maintenanceModel: Model<MaintenanceDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     private notificationsService: NotificationsService,
-  ) {}
+    private configService: ConfigService,
+  ) {
+    const cloudName = this.configService.get<string>('CLOUDINARY_CLOUD_NAME');
+    const apiKey = this.configService.get<string>('CLOUDINARY_API_KEY');
+    const apiSecret = this.configService.get<string>('CLOUDINARY_API_SECRET');
+
+    this.isCloudinaryConfigured = Boolean(cloudName && apiKey && apiSecret);
+    this.cloudinaryFolder =
+      this.configService.get<string>('CLOUDINARY_MAINTENANCE_FOLDER') ||
+      'dormitory/maintenance';
+
+    if (this.isCloudinaryConfigured) {
+      cloudinary.config({
+        cloud_name: cloudName,
+        api_key: apiKey,
+        api_secret: apiSecret,
+      });
+    }
+  }
 
   // Trọng số sắp xếp trạng thái (Nhỏ xếp trước)
   private readonly statusWeight: Record<string, number> = {
@@ -22,7 +57,29 @@ export class MaintenanceService {
     [MaintenanceStatus.REJECTED]: 4,
   };
 
-  async createRequest(userId: string, createDto: any) {
+  private async uploadImage(file?: MaintenanceImageFile) {
+    if (!file) return undefined;
+
+    if (!file.mimetype.startsWith('image/')) {
+      throw new BadRequestException('Chi duoc dinh kem file anh');
+    }
+
+    if (!this.isCloudinaryConfigured) {
+      throw new InternalServerErrorException(
+        'Chua cau hinh Cloudinary tren server',
+      );
+    }
+
+    const dataUri = `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
+    const result = await cloudinary.uploader.upload(dataUri, {
+      folder: this.cloudinaryFolder,
+      resource_type: 'image',
+    });
+
+    return result.secure_url;
+  }
+
+  async createRequest(userId: string, createDto: any, image?: MaintenanceImageFile) {
     const { title, description, priority, imageUrl } = createDto;
 
     const user = await this.userModel.findById(userId).lean();
@@ -30,13 +87,15 @@ export class MaintenanceService {
       throw new BadRequestException('Bạn chưa được xếp phòng, không thể gửi yêu cầu sửa chữa.');
     }
 
+    const uploadedImageUrl = await this.uploadImage(image);
+
     const newRequest = await this.maintenanceModel.create({
       user: new Types.ObjectId(userId),
       room: user.room,
       title,
       description,
       priority,
-      imageUrl,
+      imageUrl: uploadedImageUrl || imageUrl,
       status: MaintenanceStatus.PENDING,
     });
     
