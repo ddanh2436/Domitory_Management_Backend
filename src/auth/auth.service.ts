@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, ConflictException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ConflictException, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { JwtService } from '@nestjs/jwt';
@@ -137,5 +137,33 @@ export class AuthService {
       }
       throw new UnauthorizedException('Xác thực Google thất bại');
     }
+  }
+
+  // 4. TÍNH NĂNG MỚI: Hàm đặt lại mật khẩu trực tiếp cho Sandbox
+  async resetPasswordSandbox(email: string, newPassword: string) {
+    if (!email || !newPassword) {
+      throw new BadRequestException('Vui lòng cung cấp đầy đủ email và mật khẩu mới');
+    }
+
+    if (newPassword.length < 6) {
+      throw new BadRequestException('Mật khẩu mới phải có ít nhất 6 ký tự');
+    }
+
+    const user = await this.userModel.findOne({ email });
+    
+    if (!user) {
+      throw new NotFoundException('Không tìm thấy tài khoản với email này.');
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(newPassword, salt);
+
+    user.passwordHash = passwordHash;
+    await user.save();
+
+    return { 
+      success: true, 
+      message: 'Mật khẩu đã được thiết lập lại thành công (Sandbox).' 
+    };
   }
 }
