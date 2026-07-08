@@ -19,9 +19,11 @@ export class User {
   email!: string;
 
   @Prop()
-  mssv?: string; 
+  mssv?: string;
 
-  @Prop({ required: true })
+  // select: false — mặc định KHÔNG trả về passwordHash trong mọi query,
+  // nơi nào thật sự cần (đăng nhập) phải chủ động .select('+passwordHash')
+  @Prop({ required: true, select: false })
   passwordHash!: string;
 
   @Prop({ required: true, enum: USER_ROLES, default: 'STUDENT' })

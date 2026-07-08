@@ -1,12 +1,13 @@
-import { 
-  Controller, 
-  Get, 
-  Post, 
-  Body, 
-  Patch, 
-  Param, 
-  Query, 
-  UseGuards 
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Query,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
 import { InvoicesService } from './invoices.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
@@ -30,23 +31,19 @@ export class InvoicesController {
   // 2. Admin xem danh sách toàn bộ hóa đơn (Có phân trang & Lọc)
   @Get()
   @Roles('ADMIN', 'DORMITORY_MANAGER')
-  findAll(@Query() query: any) {
-    // Ép kiểu từ String trên URL sang Number cho đúng DTO
-    const formattedQuery: QueryInvoiceDto = {
-      ...query,
-      page: query.page ? Number(query.page) : 1,
-      limit: query.limit ? Number(query.limit) : 20,
-      month: query.month ? Number(query.month) : undefined,
-      year: query.year ? Number(query.year) : undefined,
-    };
-    return this.invoicesService.getAllInvoices(formattedQuery);
+  findAll(@Query() query: QueryInvoiceDto) {
+    // ValidationPipe (transform: true) đã tự ép kiểu page/limit/month/year sang number
+    return this.invoicesService.getAllInvoices(query);
   }
 
   // 3. Xem danh sách hóa đơn theo ID phòng (Admin hoặc Student đều xem được)
   @Get('room/:roomId')
   @Roles('ADMIN', 'DORMITORY_MANAGER', 'FLOOR_MANAGER', 'STUDENT')
-  findByRoom(@Param('roomId') roomId: string) {
-    return this.invoicesService.getInvoicesByRoom(roomId);
+  findByRoom(@Param('roomId') roomId: string, @Req() req: any) {
+    return this.invoicesService.getInvoicesByRoom(roomId, {
+      userId: req.user.sub,
+      role: req.user.role,
+    });
   }
 
   @Get('stats/revenue')
@@ -71,7 +68,7 @@ export class InvoicesController {
 
   @Patch(':id/pay-mock')
   @Roles('STUDENT')
-  mockPayInvoice(@Param('id') id: string) {
-    return this.invoicesService.mockPay(id);
+  mockPayInvoice(@Param('id') id: string, @Req() req: any) {
+    return this.invoicesService.mockPay(id, req.user.sub);
   }
 }

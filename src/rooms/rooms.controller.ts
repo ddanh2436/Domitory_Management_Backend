@@ -1,15 +1,15 @@
-import { 
-  Controller, 
-  Get, 
-  Post, 
-  Body, 
-  Patch, 
-  Param, 
-  Delete, 
-  Query, 
-  UseGuards, 
-  Request, 
-  BadRequestException 
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  Query,
+  UseGuards,
+  Request,
+  BadRequestException,
 } from '@nestjs/common';
 import { RoomsService } from './rooms.service';
 import { CreateRoomDto } from './dto/create-room.dto';
@@ -32,14 +32,8 @@ export class RoomsController {
 
   @Get()
   findAll(@Query() query: SearchRoomDto) {
-    const formattedQuery = {
-      ...query,
-      page: query.page ? Number(query.page) : 1,
-      limit: query.limit ? Number(query.limit) : 20,
-      minPrice: query.minPrice ? Number(query.minPrice) : undefined,
-      maxPrice: query.maxPrice ? Number(query.maxPrice) : undefined,
-    };
-    return this.roomsService.findAll(formattedQuery);
+    // ValidationPipe (transform: true) đã tự ép kiểu page/limit/minPrice/maxPrice sang number
+    return this.roomsService.findAll(query);
   }
 
   // ĐÃ CẬP NHẬT: Xử lý tìm phòng cá nhân của Student
@@ -48,15 +42,18 @@ export class RoomsController {
   @Roles('STUDENT', 'ADMIN', 'DORMITORY_MANAGER')
   async findMyRoom(@Request() req: any) {
     // Ưu tiên lấy từ req.user.sub (chuẩn JWT payload của bạn), sau đó fallback sang các biến khác
-    const userId = req.user?.sub || req.user?.userId || req.user?._id || req.user?.id;
-    
+    const userId =
+      req.user?.sub || req.user?.userId || req.user?._id || req.user?.id;
+
     // Validate tránh lỗi truyền undefined xuống Service
     if (!userId) {
-      throw new BadRequestException('Không thể đọc được thông tin ID người dùng từ Token.');
+      throw new BadRequestException(
+        'Không thể đọc được thông tin ID người dùng từ Token.',
+      );
     }
 
     const room = await this.roomsService.findRoomByUserId(userId);
-    
+
     // Bọc vào object có key 'data' để tương thích 100% với Frontend (payload.data)
     return { data: room };
   }

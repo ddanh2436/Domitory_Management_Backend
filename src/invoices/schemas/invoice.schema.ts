@@ -47,3 +47,7 @@ export class Invoice {
 }
 
 export const InvoiceSchema = SchemaFactory.createForClass(Invoice);
+
+// Mỗi phòng chỉ có duy nhất 1 hóa đơn cho mỗi kỳ tháng/năm —
+// chặn tạo trùng ở tầng CSDL kể cả khi 2 request chạy song song.
+InvoiceSchema.index({ room: 1, month: 1, year: 1 }, { unique: true });

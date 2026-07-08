@@ -1,17 +1,34 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, ClientSession, Types } from 'mongoose'; 
+import { Model, ClientSession, Types } from 'mongoose';
 import { Contract, ContractDocument } from './schemas/contract.schema';
+import { Room, RoomDocument } from '../rooms/schemas/room.schema';
+import { User, UserDocument } from '../users/schemas/user.schema';
 
 @Injectable()
 export class ContractsService {
-  constructor(@InjectModel(Contract.name) private contractModel: Model<ContractDocument>) {}
+  constructor(
+    @InjectModel(Contract.name) private contractModel: Model<ContractDocument>,
+    @InjectModel(Room.name) private roomModel: Model<RoomDocument>,
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
+  ) {}
 
-  async createContractFromBooking(booking: any, roomPrice: number, session?: ClientSession) {
-    const contractNumber = `HD-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+  async createContractFromBooking(
+    booking: any,
+    roomPrice: number,
+    session?: ClientSession,
+  ) {
+    // Kết hợp mốc thời gian (base36) + số ngẫu nhiên để gần như không thể trùng,
+    // đồng thời đã có unique index trên contractNumber làm hàng rào cuối cùng.
+    const uniquePart = `${Date.now().toString(36).toUpperCase()}${Math.floor(1000 + Math.random() * 9000)}`;
+    const contractNumber = `HD-${new Date().getFullYear()}-${uniquePart}`;
     const startDate = new Date();
     const endDate = new Date();
-    endDate.setMonth(endDate.getMonth() + 5); 
+    endDate.setMonth(endDate.getMonth() + 5);
 
     const terms = `1. Bên A có trách nhiệm cung cấp phòng ở đúng tiêu chuẩn kỹ thuật.\n2. Bên B tuân thủ nghiêm chỉnh các quy định phòng dịch, an toàn phòng cháy chữa cháy và nội quy nội trú.\n3. Tiền phòng thanh toán theo chu kỳ hóa đơn hàng tháng.`;
 
@@ -22,7 +39,7 @@ export class ContractsService {
       contractNumber,
       startDate,
       endDate,
-      rentalFee: roomPrice, 
+      rentalFee: roomPrice,
       terms,
     });
 
@@ -31,46 +48,76 @@ export class ContractsService {
 
   // 1. HÀM TÌM HỢP ĐỒNG GIỮ NGUYÊN BẢN CŨ CỦA BẠN (Không dùng .sort)
   async findMyContract(userId: string) {
-    const contract = await this.contractModel.findOne({ user: new Types.ObjectId(userId) })
+    const contract = await this.contractModel
+      .findOne({ user: new Types.ObjectId(userId) })
       .populate('user', 'fullName mssv email phone cccd')
       .populate('room', 'name building floor price');
-      
-    if (!contract) return null; 
+
+    if (!contract) return null;
     return contract;
   }
 
   // 2. CHỈ THÊM 2 HÀM NÀY XUỐNG CUỐI
   // FR15: Logic gia hạn hợp đồng
   async extendContract(userId: string, months: number) {
-    const contract = await this.contractModel.findOne({ 
-      user: new Types.ObjectId(userId), 
-      status: 'ACTIVE' 
+    // Chặn số tháng không hợp lệ (âm, 0, không nguyên, quá lớn) làm hỏng endDate
+    if (!Number.isInteger(months) || months < 1 || months > 12) {
+      throw new BadRequestException(
+        'Số tháng gia hạn phải là số nguyên từ 1 đến 12',
+      );
+    }
+
+    const contract = await this.contractModel.findOne({
+      user: new Types.ObjectId(userId),
+      status: 'ACTIVE',
     });
-    
+
     if (!contract) {
       throw new NotFoundException('Không tìm thấy hợp đồng đang hoạt động');
     }
-    
+
     const newEndDate = new Date(contract.endDate);
     newEndDate.setMonth(newEndDate.getMonth() + months);
-    
+
     contract.endDate = newEndDate;
     return contract.save();
   }
 
-  // FR16: Logic thanh lý hợp đồng
+  // FR16: Logic thanh lý hợp đồng — kèm TRẢ PHÒNG (giảm sức chứa, gỡ user khỏi phòng)
   async terminateContract(userId: string) {
-    const contract = await this.contractModel.findOne({ 
-      user: new Types.ObjectId(userId), 
-      status: 'ACTIVE' 
+    const contract = await this.contractModel.findOne({
+      user: new Types.ObjectId(userId),
+      status: 'ACTIVE',
     });
-    
+
     if (!contract) {
       throw new NotFoundException('Không tìm thấy hợp đồng đang hoạt động');
     }
-    
+
     contract.status = 'TERMINATED';
     contract.endDate = new Date();
-    return contract.save();
+    await contract.save();
+
+    // Trả lại 1 chỗ trống cho phòng (không cho tụt xuống dưới 0)
+    const updatedRoom = await this.roomModel.findOneAndUpdate(
+      { _id: contract.room, currentOccupancy: { $gt: 0 } },
+      { $inc: { currentOccupancy: -1 } },
+      { returnDocument: 'after' },
+    );
+
+    // Nếu phòng đang FULL mà giờ đã có chỗ thì mở lại thành AVAILABLE
+    if (
+      updatedRoom &&
+      updatedRoom.status === 'FULL' &&
+      updatedRoom.currentOccupancy < updatedRoom.capacity
+    ) {
+      updatedRoom.status = 'AVAILABLE';
+      await updatedRoom.save();
+    }
+
+    // Gỡ sinh viên ra khỏi phòng để không còn hiện diện trong danh sách occupants
+    await this.userModel.findByIdAndUpdate(userId, { $unset: { room: 1 } });
+
+    return contract;
   }
 }

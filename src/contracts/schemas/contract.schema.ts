@@ -14,7 +14,7 @@ export class Contract {
   @Prop({ type: Types.ObjectId, ref: 'Room', required: true })
   room!: Types.ObjectId;
 
-  @Prop({ required: true })
+  @Prop({ required: true, unique: true })
   contractNumber!: string; // Số hợp đồng (Ví dụ: HD-2026-001)
 
   @Prop({ required: true })

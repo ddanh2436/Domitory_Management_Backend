@@ -1,15 +1,25 @@
-import { Injectable, UnauthorizedException, ConflictException, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  UnauthorizedException,
+  ConflictException,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { OAuth2Client } from 'google-auth-library';
 import { User, UserDocument } from '../users/schemas/user.schema';
+import { LoginDto, RegisterDto } from './dto/auth.dto';
 
 @Injectable()
 export class AuthService {
   // THAY MÃ CLIENT ID CỦA BẠN VÀO ĐÂY
-  private googleClient = new OAuth2Client('554498848939-6lfe3dqvl8ca1uaudvk9hqs0rm5irt26.apps.googleusercontent.com');
+  private googleClient = new OAuth2Client(
+    '554498848939-6lfe3dqvl8ca1uaudvk9hqs0rm5irt26.apps.googleusercontent.com',
+  );
 
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
@@ -17,7 +27,7 @@ export class AuthService {
   ) {}
 
   // 1. Hàm Đăng ký thủ công
-  async register(registerDto: any) {
+  async register(registerDto: RegisterDto) {
     const { email, mssv, password, fullName } = registerDto;
 
     // Kiểm tra trùng Email
@@ -30,7 +40,9 @@ export class AuthService {
     if (mssv && mssv.trim() !== '') {
       const existingMssv = await this.userModel.findOne({ mssv });
       if (existingMssv) {
-        throw new ConflictException('MSSV này đã được đăng ký cho một tài khoản khác');
+        throw new ConflictException(
+          'MSSV này đã được đăng ký cho một tài khoản khác',
+        );
       }
     }
 
@@ -39,7 +51,7 @@ export class AuthService {
 
     const newUser = new this.userModel({
       email,
-      mssv, 
+      mssv,
       passwordHash,
       fullName,
       role: 'STUDENT',
@@ -50,14 +62,14 @@ export class AuthService {
   }
 
   // 2. Hàm Đăng nhập thủ công
-  async login(loginDto: any) {
+  async login(loginDto: LoginDto) {
     // Lấy thêm identifier (từ Frontend gửi lên)
     const { email, mssv, identifier, password } = loginDto;
 
     const searchCondition: any[] = [];
     if (email) searchCondition.push({ email });
     if (mssv) searchCondition.push({ mssv });
-    
+
     // TÍNH NĂNG MỚI: Hỗ trợ frontend truyền chung 1 biến identifier cho cả email/mssv
     if (identifier) {
       searchCondition.push({ email: identifier });
@@ -68,14 +80,20 @@ export class AuthService {
       throw new UnauthorizedException('Vui lòng nhập Email hoặc MSSV');
     }
 
-    const user = await this.userModel.findOne({ $or: searchCondition });
-    
+    // passwordHash có select: false trong schema nên phải chủ động lấy thêm (+) để so sánh mật khẩu
+    const user = await this.userModel
+      .findOne({ $or: searchCondition })
+      .select('+passwordHash');
+
     if (!user) {
-      throw new UnauthorizedException('Sai thông tin đăng nhập (Email/MSSV không tồn tại)');
+      throw new UnauthorizedException(
+        'Sai thông tin đăng nhập (Email/MSSV không tồn tại)',
+      );
     }
 
     if (user.accessStatus === 'LOCKED') {
-      const reason = user.blockReason || 'Vi phạm nội quy hoặc chưa thanh toán phí';
+      const reason =
+        user.blockReason || 'Vi phạm nội quy hoặc chưa thanh toán phí';
       throw new UnauthorizedException(`Tài khoản đã bị khóa. Lý do: ${reason}`);
     }
 
@@ -84,7 +102,12 @@ export class AuthService {
       throw new UnauthorizedException('Sai mật khẩu');
     }
 
-    const payload = { sub: user._id, email: user.email, role: user.role, accessStatus: user.accessStatus ?? 'ACTIVE' };
+    const payload = {
+      sub: user._id,
+      email: user.email,
+      role: user.role,
+      accessStatus: user.accessStatus ?? 'ACTIVE',
+    };
     return {
       access_token: await this.jwtService.signAsync(payload),
       user: {
@@ -94,7 +117,7 @@ export class AuthService {
         fullName: user.fullName,
         role: user.role,
         accessStatus: user.accessStatus ?? 'ACTIVE',
-      }
+      },
     };
   }
 
@@ -104,10 +127,11 @@ export class AuthService {
       const ticket = await this.googleClient.verifyIdToken({
         idToken: googleToken,
         // THAY MÃ CLIENT ID CỦA BẠN VÀO ĐÂY NỮA NHÉ
-        audience: '554498848939-6lfe3dqvl8ca1uaudvk9hqs0rm5irt26.apps.googleusercontent.com', 
+        audience:
+          '554498848939-6lfe3dqvl8ca1uaudvk9hqs0rm5irt26.apps.googleusercontent.com',
       });
       const payload = ticket.getPayload();
-      
+
       if (!payload || !payload.email) {
         throw new UnauthorizedException('Token Google không hợp lệ');
       }
@@ -129,11 +153,19 @@ export class AuthService {
         });
         await user.save();
       } else if (user.accessStatus === 'LOCKED') {
-        const reason = user.blockReason || 'Vi phạm nội quy hoặc chưa thanh toán phí';
-        throw new UnauthorizedException(`Tài khoản đã bị khóa. Lý do: ${reason}`);
+        const reason =
+          user.blockReason || 'Vi phạm nội quy hoặc chưa thanh toán phí';
+        throw new UnauthorizedException(
+          `Tài khoản đã bị khóa. Lý do: ${reason}`,
+        );
       }
 
-      const jwtPayload = { sub: user._id, email: user.email, role: user.role, accessStatus: user.accessStatus ?? 'ACTIVE' };
+      const jwtPayload = {
+        sub: user._id,
+        email: user.email,
+        role: user.role,
+        accessStatus: user.accessStatus ?? 'ACTIVE',
+      };
       return {
         access_token: await this.jwtService.signAsync(jwtPayload),
         user: {
@@ -143,7 +175,7 @@ export class AuthService {
           fullName: user.fullName,
           role: user.role,
           accessStatus: user.accessStatus ?? 'ACTIVE',
-        }
+        },
       };
     } catch (error) {
       if (error instanceof UnauthorizedException) {
@@ -154,9 +186,18 @@ export class AuthService {
   }
 
   // 4. Hàm đặt lại mật khẩu trực tiếp cho Sandbox
+  // CẢNH BÁO: endpoint này KHÔNG xác thực người gọi — chỉ được phép tồn tại ở môi trường dev.
   async resetPasswordSandbox(email: string, newPassword: string) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new ForbiddenException(
+        'Tính năng này đã bị vô hiệu hóa trên môi trường production',
+      );
+    }
+
     if (!email || !newPassword) {
-      throw new BadRequestException('Vui lòng cung cấp đầy đủ email và mật khẩu mới');
+      throw new BadRequestException(
+        'Vui lòng cung cấp đầy đủ email và mật khẩu mới',
+      );
     }
 
     if (newPassword.length < 6) {
@@ -164,7 +205,7 @@ export class AuthService {
     }
 
     const user = await this.userModel.findOne({ email });
-    
+
     if (!user) {
       throw new NotFoundException('Không tìm thấy tài khoản với email này.');
     }
@@ -175,9 +216,9 @@ export class AuthService {
     user.passwordHash = passwordHash;
     await user.save();
 
-    return { 
-      success: true, 
-      message: 'Mật khẩu đã được thiết lập lại thành công (Sandbox).' 
+    return {
+      success: true,
+      message: 'Mật khẩu đã được thiết lập lại thành công (Sandbox).',
     };
   }
 }
