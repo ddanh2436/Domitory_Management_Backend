@@ -20,9 +20,18 @@ export class AuthService {
   async register(registerDto: any) {
     const { email, mssv, password, fullName } = registerDto;
 
+    // Kiểm tra trùng Email
     const existingUser = await this.userModel.findOne({ email });
     if (existingUser) {
       throw new ConflictException('Email này đã được sử dụng');
+    }
+
+    // TÍNH NĂNG MỚI: Kiểm tra trùng MSSV (nếu người dùng có nhập)
+    if (mssv && mssv.trim() !== '') {
+      const existingMssv = await this.userModel.findOne({ mssv });
+      if (existingMssv) {
+        throw new ConflictException('MSSV này đã được đăng ký cho một tài khoản khác');
+      }
     }
 
     const salt = await bcrypt.genSalt(10);
@@ -42,11 +51,18 @@ export class AuthService {
 
   // 2. Hàm Đăng nhập thủ công
   async login(loginDto: any) {
-    const { email, mssv, password } = loginDto;
+    // Lấy thêm identifier (từ Frontend gửi lên)
+    const { email, mssv, identifier, password } = loginDto;
 
     const searchCondition: any[] = [];
     if (email) searchCondition.push({ email });
     if (mssv) searchCondition.push({ mssv });
+    
+    // TÍNH NĂNG MỚI: Hỗ trợ frontend truyền chung 1 biến identifier cho cả email/mssv
+    if (identifier) {
+      searchCondition.push({ email: identifier });
+      searchCondition.push({ mssv: identifier });
+    }
 
     if (searchCondition.length === 0) {
       throw new UnauthorizedException('Vui lòng nhập Email hoặc MSSV');
@@ -58,7 +74,6 @@ export class AuthService {
       throw new UnauthorizedException('Sai thông tin đăng nhập (Email/MSSV không tồn tại)');
     }
 
-    // TÍNH NĂNG MỚI: Báo lỗi kèm theo lý do khóa tài khoản
     if (user.accessStatus === 'LOCKED') {
       const reason = user.blockReason || 'Vi phạm nội quy hoặc chưa thanh toán phí';
       throw new UnauthorizedException(`Tài khoản đã bị khóa. Lý do: ${reason}`);
@@ -114,7 +129,6 @@ export class AuthService {
         });
         await user.save();
       } else if (user.accessStatus === 'LOCKED') {
-        // TÍNH NĂNG MỚI: Báo lỗi kèm lý do nếu đăng nhập bằng Google bị chặn
         const reason = user.blockReason || 'Vi phạm nội quy hoặc chưa thanh toán phí';
         throw new UnauthorizedException(`Tài khoản đã bị khóa. Lý do: ${reason}`);
       }
@@ -139,7 +153,7 @@ export class AuthService {
     }
   }
 
-  // 4. TÍNH NĂNG MỚI: Hàm đặt lại mật khẩu trực tiếp cho Sandbox
+  // 4. Hàm đặt lại mật khẩu trực tiếp cho Sandbox
   async resetPasswordSandbox(email: string, newPassword: string) {
     if (!email || !newPassword) {
       throw new BadRequestException('Vui lòng cung cấp đầy đủ email và mật khẩu mới');
