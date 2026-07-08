@@ -26,7 +26,8 @@ export class MaintenanceService {
   private readonly cloudinaryFolder: string;
 
   constructor(
-    @InjectModel(Maintenance.name) private maintenanceModel: Model<MaintenanceDocument>,
+    @InjectModel(Maintenance.name)
+    private maintenanceModel: Model<MaintenanceDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     private notificationsService: NotificationsService,
     private configService: ConfigService,
@@ -79,12 +80,18 @@ export class MaintenanceService {
     return result.secure_url;
   }
 
-  async createRequest(userId: string, createDto: any, image?: MaintenanceImageFile) {
+  async createRequest(
+    userId: string,
+    createDto: any,
+    image?: MaintenanceImageFile,
+  ) {
     const { title, description, priority, imageUrl } = createDto;
 
     const user = await this.userModel.findById(userId).lean();
     if (!user || !user.room) {
-      throw new BadRequestException('Bạn chưa được xếp phòng, không thể gửi yêu cầu sửa chữa.');
+      throw new BadRequestException(
+        'Bạn chưa được xếp phòng, không thể gửi yêu cầu sửa chữa.',
+      );
     }
 
     const uploadedImageUrl = await this.uploadImage(image);
@@ -98,20 +105,23 @@ export class MaintenanceService {
       imageUrl: uploadedImageUrl || imageUrl,
       status: MaintenanceStatus.PENDING,
     });
-    
+
     try {
-      const admins = await this.userModel.find({ role: 'ADMIN' }).select('_id').lean();
+      const admins = await this.userModel
+        .find({ role: 'ADMIN' })
+        .select('_id')
+        .lean();
       for (const admin of admins) {
         await this.notificationsService.createAndSend({
           recipient: admin._id.toString(),
           title: 'Yêu cầu bảo trì mới! 🛠️',
           message: `Sinh viên ${user.fullName} vừa báo sự cố: "${title}"`,
           type: 'MAINTENANCE',
-          link: '/admin/maintenance'
+          link: '/admin/maintenance',
         });
       }
     } catch (err) {
-      console.error("Lỗi bắn socket thông báo cho Admin:", err);
+      console.error('Lỗi bắn socket thông báo cho Admin:', err);
     }
 
     return { message: 'Gửi yêu cầu thành công', request: newRequest };
@@ -147,30 +157,49 @@ export class MaintenanceService {
   }
 
   async updateStatus(requestId: string, status: string) {
-    if (!isValidObjectId(requestId)) throw new BadRequestException('ID không hợp lệ');
+    if (!isValidObjectId(requestId))
+      throw new BadRequestException('ID không hợp lệ');
 
-    const updateData: any = { status };
+    // Chỉ chấp nhận đúng các trạng thái hợp lệ, tránh lưu chuỗi tự do làm hỏng sort/thống kê
+    const validStatuses = Object.values(MaintenanceStatus) as string[];
+    if (!validStatuses.includes(status)) {
+      throw new BadRequestException('Trạng thái yêu cầu bảo trì không hợp lệ');
+    }
+
     const request = await this.maintenanceModel.findById(requestId);
-
     if (!request) throw new NotFoundException('Không tìm thấy yêu cầu này');
 
-    if (status === MaintenanceStatus.RESOLVED) {
-      updateData.resolvedAt = new Date();
+    // Ghi nhận việc CHUYỂN sang RESOLVED (chỉ khi trước đó chưa RESOLVED)
+    // để không gửi trùng thông báo mỗi lần bấm cập nhật lại.
+    const justResolved =
+      status === MaintenanceStatus.RESOLVED &&
+      request.status !== MaintenanceStatus.RESOLVED;
 
-      await this.notificationsService.createAndSend({
-        recipient: request.user.toString(),
-        title: 'Sửa chữa hoàn tất!',
-        message: `Sự cố "${request.title}" của phòng bạn đã được khắc phục xong.`,
-        type: 'MAINTENANCE',
-        link: '/student/maintenance',
-      });
+    const updateData: any = { status };
+    if (justResolved) {
+      updateData.resolvedAt = new Date();
     }
 
     const updatedRequest = await this.maintenanceModel.findByIdAndUpdate(
       requestId,
       updateData,
-      { returnDocument: 'after' }
+      { returnDocument: 'after' },
     );
+
+    // Gửi thông báo SAU KHI đã cập nhật thành công
+    if (justResolved) {
+      try {
+        await this.notificationsService.createAndSend({
+          recipient: request.user.toString(),
+          title: 'Sửa chữa hoàn tất!',
+          message: `Sự cố "${request.title}" của phòng bạn đã được khắc phục xong.`,
+          type: 'MAINTENANCE',
+          link: '/student/maintenance',
+        });
+      } catch (err) {
+        console.error('Lỗi gửi thông báo hoàn tất bảo trì:', err);
+      }
+    }
 
     return { message: 'Cập nhật tiến độ thành công', request: updatedRequest };
   }
@@ -189,10 +218,10 @@ export class MaintenanceService {
       PENDING: 'Chưa xử lý',
       IN_PROGRESS: 'Đang sửa chữa',
       RESOLVED: 'Đã hoàn thành',
-      REJECTED: 'Từ chối'
+      REJECTED: 'Từ chối',
     };
 
-    return stats.map(s => ({
+    return stats.map((s) => ({
       name: statusMap[s._id] || s._id,
       value: s.value,
     }));

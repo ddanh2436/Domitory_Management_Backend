@@ -3,6 +3,7 @@ import {
   BadRequestException,
   NotFoundException,
   ConflictException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -60,7 +61,9 @@ export class InvoicesService {
     }
 
     if (dueDate <= new Date()) {
-      throw new BadRequestException('Hạn đóng tiền phải sau thời điểm hiện tại');
+      throw new BadRequestException(
+        'Hạn đóng tiền phải sau thời điểm hiện tại',
+      );
     }
 
     return dueDate;
@@ -110,17 +113,27 @@ export class InvoicesService {
 
     const totalAmount = room.price + electricityFee + waterFee;
 
-    return this.invoiceModel.create({
-      room: new Types.ObjectId(roomId),
-      month,
-      year,
-      roomFee: room.price,
-      electricityFee,
-      waterFee,
-      totalAmount,
-      dueDate: parsedDueDate,
-      status: InvoiceStatus.PENDING,
-    });
+    try {
+      return await this.invoiceModel.create({
+        room: new Types.ObjectId(roomId),
+        month,
+        year,
+        roomFee: room.price,
+        electricityFee,
+        waterFee,
+        totalAmount,
+        dueDate: parsedDueDate,
+        status: InvoiceStatus.PENDING,
+      });
+    } catch (error: any) {
+      // Trường hợp 2 request tạo cùng lúc lọt qua findOne ở trên: unique index bắn E11000
+      if (error?.code === 11000) {
+        throw new ConflictException(
+          `Phòng "${room.name}" đã có hóa đơn tháng ${month}/${year}`,
+        );
+      }
+      throw error;
+    }
   }
 
   // ─── 2. Lấy danh sách hóa đơn (có filter + pagination) ─────────────────────
@@ -164,8 +177,24 @@ export class InvoicesService {
 
   // ─── 3. Lấy toàn bộ hóa đơn của một phòng ──────────────────────────────────
 
-  async getInvoicesByRoom(roomId: string): Promise<Invoice[]> {
+  async getInvoicesByRoom(
+    roomId: string,
+    requester?: { userId: string; role: string },
+  ): Promise<Invoice[]> {
     this.validateObjectId(roomId, 'roomId');
+
+    // Sinh viên chỉ được xem hóa đơn của chính phòng mình đang ở
+    if (requester && requester.role === 'STUDENT') {
+      const user = await this.userModel
+        .findById(requester.userId)
+        .select('room')
+        .lean();
+      if (!user || !user.room || user.room.toString() !== roomId) {
+        throw new ForbiddenException(
+          'Bạn chỉ có thể xem hóa đơn của phòng mình đang ở',
+        );
+      }
+    }
 
     const roomExists = await this.roomModel.exists({ _id: roomId });
     if (!roomExists) {
@@ -202,7 +231,51 @@ export class InvoicesService {
     invoice.paidAt = new Date(); // Ghi nhận thời điểm thanh toán
     await invoice.save();
 
+    // Gửi thông báo giống hệt luồng sinh viên tự thanh toán (thống nhất 2 đường)
+    await this.sendPaymentNotifications(invoice);
+
     return { message: 'Xác nhận thanh toán thành công', invoice };
+  }
+
+  // Gửi thông báo real-time cho sinh viên trong phòng + toàn bộ Admin khi hóa đơn được thanh toán.
+  // Lỗi gửi thông báo không được làm hỏng kết quả thanh toán đã lưu.
+  private async sendPaymentNotifications(
+    invoice: InvoiceDocument,
+  ): Promise<void> {
+    try {
+      const room = await this.roomModel.findById(invoice.room).lean();
+      const roomName = room ? room.name : 'của phòng';
+
+      const students = await this.userModel
+        .find({ room: invoice.room, role: 'STUDENT' })
+        .select('_id')
+        .lean();
+      for (const student of students) {
+        await this.notificationsService.createAndSend({
+          recipient: student._id.toString(),
+          title: 'Thanh toán hóa đơn thành công! 💳',
+          message: `Hóa đơn kỳ tháng ${invoice.month}/${invoice.year} đã được gạch nợ thành công.`,
+          type: 'INVOICE',
+          link: '/student/invoices',
+        });
+      }
+
+      const admins = await this.userModel
+        .find({ role: 'ADMIN' })
+        .select('_id')
+        .lean();
+      for (const admin of admins) {
+        await this.notificationsService.createAndSend({
+          recipient: admin._id.toString(),
+          title: 'Hóa đơn đã được đóng 💰',
+          message: `Phòng ${roomName} đã hoàn tất thanh toán hóa đơn kỳ tháng ${invoice.month}/${invoice.year}.`,
+          type: 'INVOICE',
+          link: '/admin/invoices',
+        });
+      }
+    } catch (err) {
+      console.error('Lỗi gửi thông báo real-time khi thanh toán hóa đơn:', err);
+    }
   }
 
   // ─── 5. Đánh dấu hóa đơn quá hạn (chạy bằng Cron Job) ─────────────────────
@@ -295,54 +368,41 @@ export class InvoicesService {
     }
   }
 
-async mockPay(invoiceId: string) {
+  async mockPay(invoiceId: string, userId: string) {
+    this.validateObjectId(invoiceId, 'invoiceId');
+
     const invoice = await this.invoiceModel.findById(invoiceId);
     if (!invoice) throw new NotFoundException('Không tìm thấy hóa đơn');
-    if (invoice.status === 'PAID') throw new BadRequestException('Hóa đơn này đã được thanh toán');
+    if (invoice.status === InvoiceStatus.PAID)
+      throw new BadRequestException('Hóa đơn này đã được thanh toán');
 
-    // 1. Đổi trạng thái thành PAID dưới DB
-    invoice.status = 'PAID';
+    // Sinh viên chỉ được thanh toán hóa đơn thuộc phòng của chính mình
+    const user = await this.userModel.findById(userId).select('room').lean();
+    if (
+      !user ||
+      !user.room ||
+      user.room.toString() !== invoice.room.toString()
+    ) {
+      throw new ForbiddenException(
+        'Bạn không có quyền thanh toán hóa đơn của phòng này',
+      );
+    }
+
+    // Đổi trạng thái thành PAID dưới DB
+    invoice.status = InvoiceStatus.PAID;
     invoice.paidAt = new Date();
     await invoice.save();
 
-    // 2. TỰ ĐỘNG BẮN THÔNG BÁO REAL-TIME NGAY KHI VỪA ĐỔI TRẠNG THÁI XONG
-    try {
-      // Tìm tên phòng để hiển thị nội dung thông báo cho sinh động
-      const room = await this.roomModel.findById(invoice.room).lean();
-      const roomName = room ? room.name : 'của phòng';
-
-      // Tìm tất cả sinh viên đang thuộc phòng này để bắn thông báo đồng loạt
-      const students = await this.userModel.find({ room: invoice.room }).select('_id').lean();
-      for (const student of students) {
-        await this.notificationsService.createAndSend({
-          recipient: student._id.toString(),
-          title: 'Thanh toán hóa đơn thành công! 💳',
-          message: `Hóa đơn kỳ tháng ${invoice.month}/${invoice.year} đã được gạch nợ thành công.`,
-          type: 'INVOICE',
-          link: '/student/invoices'
-        });
-      }
-
-      // Bắn thông báo cho toàn bộ Admin để biết phòng này đã đóng tiền
-      const admins = await this.userModel.find({ role: 'ADMIN' }).select('_id').lean();
-      for (const admin of admins) {
-        await this.notificationsService.createAndSend({
-          recipient: admin._id.toString(),
-          title: 'Hóa đơn đã được đóng 💰',
-          message: `Phòng ${roomName} đã hoàn tất thanh toán hóa đơn kỳ tháng ${invoice.month}/${invoice.year}.`,
-          type: 'INVOICE',
-          link: '/admin/invoices'
-        });
-      }
-    } catch (err) {
-      console.error("Lỗi gửi thông báo real-time khi thanh toán hóa đơn:", err);
-    }
+    // Bắn thông báo real-time (dùng chung một luồng với thao tác của Admin)
+    await this.sendPaymentNotifications(invoice);
 
     return { message: 'Thanh toán thành công!', invoice };
   }
 
   async getRevenueStats() {
     const stats = await this.invoiceModel.aggregate([
+      // Chỉ tính doanh thu THỰC THU (hóa đơn đã thanh toán), bỏ hóa đơn chưa đóng/quá hạn
+      { $match: { status: InvoiceStatus.PAID } },
       {
         $group: {
           _id: { month: '$month', year: '$year' },
@@ -354,11 +414,13 @@ async mockPay(invoiceId: string) {
       { $sort: { '_id.year': 1, '_id.month': 1 } },
     ]);
 
-    return stats.map(s => ({
-      name: `Tháng ${s._id.month}/${s._id.year}`,
-      'Phòng': s.roomFee,
-      'Điện': s.electricityFee,
-      'Nước': s.waterFee,
-    })).slice(-6); 
+    return stats
+      .map((s) => ({
+        name: `Tháng ${s._id.month}/${s._id.year}`,
+        Phòng: s.roomFee,
+        Điện: s.electricityFee,
+        Nước: s.waterFee,
+      }))
+      .slice(-6);
   }
 }

@@ -131,7 +131,7 @@ export class BookingsService {
         message:
           'Đăng ký phòng thành công! Vui lòng chờ Ban quản lý phê duyệt.',
         booking: {
-          _id: newBooking._id as Types.ObjectId,
+          _id: newBooking._id,
           status: newBooking.status as BookingStatus,
           createdAt: newBooking.get('createdAt') as Date,
           room: populated.room,
@@ -202,13 +202,25 @@ export class BookingsService {
         );
       }
 
-      const updatedRoom = await this.roomModel.findByIdAndUpdate(
-        booking.room,
+      // Chỉ tăng số người ở khi phòng VẪN CÒN chỗ (điều kiện $expr ngay trong query),
+      // tránh trường hợp 2 đơn PENDING cùng được duyệt làm phòng vượt sức chứa.
+      const updatedRoom = await this.roomModel.findOneAndUpdate(
+        {
+          _id: booking.room,
+          $expr: { $lt: ['$currentOccupancy', '$capacity'] },
+        },
         { $inc: { currentOccupancy: 1 } },
         { session, returnDocument: 'after' },
       );
 
-      if (updatedRoom && updatedRoom.currentOccupancy >= updatedRoom.capacity) {
+      if (!updatedRoom) {
+        throw new BadRequestException(
+          'Phòng đã hết chỗ trống, không thể duyệt thêm đơn đăng ký này.',
+        );
+      }
+
+      // Đủ người thì chuyển phòng sang trạng thái FULL
+      if (updatedRoom.currentOccupancy >= updatedRoom.capacity) {
         await this.roomModel.findByIdAndUpdate(
           booking.room,
           { status: RoomStatus.FULL },
@@ -219,22 +231,37 @@ export class BookingsService {
       await this.userModel.findByIdAndUpdate(
         booking.user,
         { room: booking.room },
-        { session, returnDocument: 'after' }
+        { session, returnDocument: 'after' },
       );
 
       // ─── TỰ ĐỘNG SINH HỢP ĐỒNG ĐIỆN TỬ KÈM THEO GIÁ PHÒNG VÀ SESSION TRANSACTION ───
-      await this.contractsService.createContractFromBooking(booking, updatedRoom?.price || 0, session);
-
-      await this.notificationsService.createAndSend({
-        recipient: booking.user.toString(),
-        title: 'Đơn đặt phòng đã được duyệt! 🎉',
-        message: 'Yêu cầu lưu trú của bạn đã được thông qua. Hãy kiểm tra phòng ở hiện tại của mình.',
-        type: 'BOOKING',
-        link: '/student'
-      });
+      await this.contractsService.createContractFromBooking(
+        booking,
+        updatedRoom?.price || 0,
+        session,
+      );
 
       await session.commitTransaction();
       this.logger.log(`Booking approved — bookingId: ${bookingId}`);
+
+      // Chỉ gửi thông báo SAU KHI transaction đã commit thành công —
+      // nếu commit fail thì sinh viên không bị nhận nhầm "đã được duyệt".
+      // Đặt ngoài try/catch commit để lỗi gửi thông báo không làm rollback dữ liệu đã lưu.
+      try {
+        await this.notificationsService.createAndSend({
+          recipient: booking.user.toString(),
+          title: 'Đơn đặt phòng đã được duyệt! 🎉',
+          message:
+            'Yêu cầu lưu trú của bạn đã được thông qua. Hãy kiểm tra phòng ở hiện tại của mình.',
+          type: 'BOOKING',
+          link: '/student',
+        });
+      } catch (notifyErr) {
+        this.logger.error(
+          `Không gửi được thông báo duyệt đơn — bookingId: ${bookingId}`,
+          notifyErr instanceof Error ? notifyErr.stack : String(notifyErr),
+        );
+      }
 
       return { message: 'Phê duyệt đơn đăng ký thành công.' };
     } catch (err) {

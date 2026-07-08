@@ -1,4 +1,9 @@
-import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  CanActivate,
+  ExecutionContext,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
 import { Request } from 'express';
@@ -15,16 +20,17 @@ export class JwtAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
     const token = this.extractTokenFromHeader(request);
-    
+
     if (!token) {
       throw new UnauthorizedException('Không tìm thấy token xác thực');
     }
     try {
-      const payload = await this.jwtService.verifyAsync(token, {
-        secret: 'DORMITORY_SECRET_KEY_2026', 
-      });
+      // Dùng secret đã cấu hình sẵn trong JwtModule (đọc từ biến môi trường JWT_SECRET)
+      const payload = await this.jwtService.verifyAsync(token);
 
-      const user = await this.userModel.findById(payload.sub).select('role accessStatus');
+      const user = await this.userModel
+        .findById(payload.sub)
+        .select('role accessStatus');
       if (!user) {
         throw new UnauthorizedException('Tài khoản không tồn tại');
       }
