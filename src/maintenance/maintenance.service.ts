@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -191,8 +192,8 @@ export class MaintenanceService {
       try {
         await this.notificationsService.createAndSend({
           recipient: request.user.toString(),
-          title: 'Sửa chữa hoàn tất!',
-          message: `Sự cố "${request.title}" của phòng bạn đã được khắc phục xong.`,
+          title: 'Sửa chữa hoàn tất! ⭐',
+          message: `Sự cố "${request.title}" của phòng bạn đã được khắc phục xong. Hãy đánh giá chất lượng sửa chữa (1-5 sao) nhé!`,
           type: 'MAINTENANCE',
           link: '/student/maintenance',
         });
@@ -202,6 +203,59 @@ export class MaintenanceService {
     }
 
     return { message: 'Cập nhật tiến độ thành công', request: updatedRequest };
+  }
+
+  // Sinh viên chấm điểm chất lượng sửa chữa (1-5 sao) sau khi yêu cầu đã RESOLVED
+  async rateRequest(requestId: string, userId: string, rating: number) {
+    if (!isValidObjectId(requestId))
+      throw new BadRequestException('ID không hợp lệ');
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      throw new BadRequestException('Điểm đánh giá phải là số nguyên từ 1 đến 5 sao');
+    }
+
+    const request = await this.maintenanceModel.findById(requestId);
+    if (!request) throw new NotFoundException('Không tìm thấy yêu cầu này');
+
+    // Chỉ chủ đơn mới được đánh giá
+    if (request.user.toString() !== userId) {
+      throw new ForbiddenException('Bạn chỉ có thể đánh giá yêu cầu của chính mình');
+    }
+
+    if (request.status !== MaintenanceStatus.RESOLVED) {
+      throw new BadRequestException('Chỉ đánh giá được yêu cầu đã hoàn thành sửa chữa');
+    }
+
+    // Mỗi yêu cầu chỉ đánh giá 1 lần
+    if (request.rating) {
+      throw new BadRequestException('Yêu cầu này đã được đánh giá trước đó');
+    }
+
+    request.rating = rating;
+    request.ratedAt = new Date();
+    await request.save();
+
+    // Báo cho Admin biết chất lượng dịch vụ vừa được chấm điểm
+    try {
+      const admins = await this.userModel
+        .find({ role: 'ADMIN' })
+        .select('_id')
+        .lean();
+      const stars = '⭐'.repeat(rating);
+      for (const admin of admins) {
+        await this.notificationsService.createAndSend({
+          recipient: admin._id.toString(),
+          title: `Đánh giá sửa chữa mới: ${stars}`,
+          message: `Sinh viên vừa chấm ${rating}/5 sao cho yêu cầu "${request.title}".`,
+          type: 'MAINTENANCE',
+          link: '/admin/maintenance',
+        });
+      }
+    } catch (err) {
+      console.error('Lỗi gửi thông báo đánh giá cho Admin:', err);
+    }
+
+    return { message: 'Cảm ơn bạn đã đánh giá!', request };
   }
 
   async getStatusStats() {
