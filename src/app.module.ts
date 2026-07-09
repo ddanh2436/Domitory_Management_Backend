@@ -10,6 +10,7 @@ import { InvoicesModule } from './invoices/invoices.module';
 import { ContractsModule } from './contracts/contracts.module'; // 👈 Import Module hợp đồng vào đây
 import { MaintenanceModule } from './maintenance/maintenance.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { ViolationsModule } from './violations/violations.module';
 
 @Module({
   imports: [
@@ -31,7 +32,8 @@ import { NotificationsModule } from './notifications/notifications.module';
     InvoicesModule,
     ContractsModule,
     MaintenanceModule,
-    NotificationsModule, 
+    NotificationsModule,
+    ViolationsModule,
   ],
 })
 export class AppModule {}

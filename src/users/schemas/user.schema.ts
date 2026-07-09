@@ -51,6 +51,10 @@ export class User {
   @Prop({ default: false })
   isTempResident!: boolean;
 
+  // Điểm hành vi/nề nếp: bắt đầu 100, admin trừ khi vi phạm; dưới 60 sẽ bị cảnh báo
+  @Prop({ default: 100, min: 0, max: 100 })
+  behaviorScore!: number;
+
   @Prop({ type: Types.ObjectId, ref: 'Room' })
   room?: Types.ObjectId;
 }
