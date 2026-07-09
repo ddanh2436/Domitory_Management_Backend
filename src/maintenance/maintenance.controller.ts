@@ -58,7 +58,14 @@ export class MaintenanceController {
     return this.maintenanceService.getMyRequests(userId);
   }
 
-  // --- API DÀNH CHO ADMIN ---
+  // Sinh viên đánh giá 1-5 sao cho yêu cầu đã hoàn thành
+  @Patch(':id/rate')
+  @Roles('STUDENT')
+  rate(@Param('id') id: string, @Body('rating') rating: number, @Req() req: any) {
+    const userId = req.user?.sub || req.user?.userId || req.user?._id || req.user?.id;
+    return this.maintenanceService.rateRequest(id, userId, Number(rating));
+  }
+
   @Get()
   @Roles('ADMIN', 'DORMITORY_MANAGER')
   findAll() {

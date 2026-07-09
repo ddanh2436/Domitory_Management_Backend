@@ -39,6 +39,13 @@ export class Maintenance {
   // Thời gian admin cập nhật trạng thái RESOLVED
   @Prop()
   resolvedAt?: Date;
+
+  // Sinh viên đánh giá chất lượng sửa chữa (1-5 sao), chỉ chấm được khi đã RESOLVED
+  @Prop({ min: 1, max: 5 })
+  rating?: number;
+
+  @Prop()
+  ratedAt?: Date;
 }
 
 export const MaintenanceSchema = SchemaFactory.createForClass(Maintenance);
