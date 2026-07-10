@@ -131,7 +131,7 @@ export class MaintenanceService {
   async getMyRequests(userId: string) {
     const requests = await this.maintenanceModel
       .find({ user: new Types.ObjectId(userId) })
-      .populate('room', 'name building')
+      .populate('room', 'name building floor')
       .lean();
 
     return requests.sort((a: any, b: any) => {
@@ -146,7 +146,7 @@ export class MaintenanceService {
     const requests = await this.maintenanceModel
       .find()
       .populate('user', 'fullName mssv phone')
-      .populate('room', 'name building')
+      .populate('room', 'name building floor')
       .lean();
 
     return requests.sort((a: any, b: any) => {

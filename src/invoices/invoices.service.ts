@@ -158,7 +158,7 @@ export class InvoicesService {
     const [data, total] = await Promise.all([
       this.invoiceModel
         .find(filter)
-        .populate('room', 'name building')
+        .populate('room', 'name building floor')
         .sort({ year: -1, month: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)

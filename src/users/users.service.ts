@@ -62,7 +62,7 @@ export class UsersService {
     return this.userModel
       .find({ role: 'STUDENT' })
       .select('-passwordHash')
-      .populate('room', 'name building') // Lấy thêm tên phòng và toà nhà
+      .populate('room', 'name building floor') // Lấy thêm tên phòng, toà nhà và tầng
       .sort({ createdAt: -1 });
   }
 
