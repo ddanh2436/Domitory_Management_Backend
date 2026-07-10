@@ -8,6 +8,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model, Types } from 'mongoose';
 import { Notification, NotificationDocument } from './schemas/notification.schema';
 import { NotificationsGateway } from './notifications.gateway';
+import { User, UserDocument } from '../users/schemas/user.schema';
 
 @Injectable()
 export class NotificationsService implements OnModuleInit {
@@ -16,6 +17,7 @@ export class NotificationsService implements OnModuleInit {
 
   constructor(
     @InjectModel(Notification.name) private notifModel: Model<NotificationDocument>,
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
     private readonly gateway: NotificationsGateway,
   ) {}
 
@@ -73,12 +75,77 @@ export class NotificationsService implements OnModuleInit {
     return newNotif;
   }
 
-  async getMyNotifications(userId: string) {
-    return this.notifModel
-      .find({ recipient: new Types.ObjectId(userId) })
-      .sort({ createdAt: -1 })
-      .limit(20)
+  // Danh sách thông báo có phân trang, kèm tổng số và số chưa đọc
+  // để frontend hiển thị badge chuông mà không cần tải toàn bộ.
+  async getMyNotifications(userId: string, page = 1, limit = 10) {
+    const safePage = Math.max(1, Math.floor(page) || 1);
+    const safeLimit = Math.min(50, Math.max(1, Math.floor(limit) || 10));
+    const recipient = new Types.ObjectId(userId);
+
+    const [data, total, unreadCount] = await Promise.all([
+      this.notifModel
+        .find({ recipient })
+        .sort({ createdAt: -1 })
+        .skip((safePage - 1) * safeLimit)
+        .limit(safeLimit)
+        .lean(),
+      this.notifModel.countDocuments({ recipient }),
+      this.notifModel.countDocuments({ recipient, isRead: false }),
+    ]);
+
+    return {
+      data,
+      total,
+      unreadCount,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.max(1, Math.ceil(total / safeLimit)),
+    };
+  }
+
+  // Đánh dấu toàn bộ thông báo chưa đọc là đã đọc (dùng cho nút trên chuông)
+  async markAllAsRead(userId: string) {
+    const readAt = new Date();
+    const result = await this.notifModel.updateMany(
+      { recipient: new Types.ObjectId(userId), isRead: false },
+      { isRead: true, readAt, expireAt: this.getReadExpireAt(readAt) },
+    );
+    return { message: 'Đã đánh dấu tất cả là đã đọc.', modified: result.modifiedCount };
+  }
+
+  // Gửi thông báo cho TOÀN BỘ sinh viên: lưu mỗi người một bản ghi rồi bắn socket riêng
+  // để badge/danh sách của từng người đều chính xác.
+  async broadcastToStudents(data: { title: string; message: string; link?: string }) {
+    if (!data.title?.trim() || !data.message?.trim()) {
+      throw new BadRequestException('Vui lòng nhập đầy đủ tiêu đề và nội dung.');
+    }
+
+    const students = await this.userModel
+      .find({ role: 'STUDENT', accessStatus: { $ne: 'LOCKED' } })
+      .select('_id')
       .lean();
+
+    if (students.length === 0) {
+      return { message: 'Không có sinh viên nào để gửi.', sent: 0 };
+    }
+
+    const expireAt = this.getUnreadExpireAt();
+    const docs = await this.notifModel.insertMany(
+      students.map((student) => ({
+        recipient: student._id,
+        title: data.title.trim(),
+        message: data.message.trim(),
+        type: 'SYSTEM',
+        link: data.link,
+        expireAt,
+      })),
+    );
+
+    for (const doc of docs) {
+      this.gateway.sendToUser(String(doc.recipient), doc);
+    }
+
+    return { message: `Đã gửi thông báo đến ${docs.length} sinh viên.`, sent: docs.length };
   }
 
   async markAsRead(notifId: string, userId: string) {
