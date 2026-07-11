@@ -33,6 +33,13 @@ export class UsersController {
     return this.usersService.findAccessControlAccounts();
   }
 
+  // Danh sách nhân viên bảo trì để admin phân công việc
+  @Get('maintenance-staff')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
+  getMaintenanceStaff() {
+    return this.usersService.findMaintenanceStaff();
+  }
+
   @Patch(':id/access-control')
   @Roles('ADMIN')
   updateAccessControl(@Param('id') userId: string, @Body() updateData: any) {

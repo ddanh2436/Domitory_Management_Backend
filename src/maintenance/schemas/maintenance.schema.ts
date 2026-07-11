@@ -36,6 +36,10 @@ export class Maintenance {
   })
   status!: string;
 
+  // Nhân viên bảo trì được phân công xử lý yêu cầu này
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  assignedTo?: Types.ObjectId;
+
   // Thời gian admin cập nhật trạng thái RESOLVED
   @Prop()
   resolvedAt?: Date;

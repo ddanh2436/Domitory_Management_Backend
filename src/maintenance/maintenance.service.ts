@@ -147,6 +147,7 @@ export class MaintenanceService {
       .find()
       .populate('user', 'fullName mssv phone')
       .populate('room', 'name building floor')
+      .populate('assignedTo', 'fullName email')
       .lean();
 
     return requests.sort((a: any, b: any) => {
@@ -157,7 +158,63 @@ export class MaintenanceService {
     });
   }
 
-  async updateStatus(requestId: string, status: string) {
+  // Danh sách yêu cầu được phân công cho một nhân viên bảo trì
+  async getAssignedRequests(staffId: string) {
+    if (!isValidObjectId(staffId))
+      throw new BadRequestException('ID không hợp lệ');
+
+    const requests = await this.maintenanceModel
+      .find({ assignedTo: new Types.ObjectId(staffId) })
+      .populate('user', 'fullName mssv phone')
+      .populate('room', 'name building floor')
+      .lean();
+
+    return requests.sort((a: any, b: any) => {
+      const weightA = this.statusWeight[a.status] || 5;
+      const weightB = this.statusWeight[b.status] || 5;
+      if (weightA !== weightB) return weightA - weightB;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+  }
+
+  // Admin phân công yêu cầu cho một nhân viên bảo trì cụ thể
+  async assignRequest(requestId: string, staffId: string) {
+    if (!isValidObjectId(requestId) || !isValidObjectId(staffId))
+      throw new BadRequestException('ID không hợp lệ');
+
+    const staff = await this.userModel.findById(staffId).lean();
+    if (!staff || staff.role !== 'MAINTENANCE_STAFF') {
+      throw new BadRequestException(
+        'Người được phân công phải là nhân viên bảo trì.',
+      );
+    }
+
+    const request = await this.maintenanceModel
+      .findByIdAndUpdate(requestId, { assignedTo: staff._id }, { returnDocument: 'after' })
+      .populate('room', 'name building floor');
+    if (!request) throw new NotFoundException('Không tìm thấy yêu cầu này');
+
+    try {
+      const roomInfo = request.room as any;
+      await this.notificationsService.createAndSend({
+        recipient: staffId,
+        title: 'Bạn được giao việc bảo trì mới! 🛠️',
+        message: `Yêu cầu "${request.title}" tại phòng ${roomInfo?.name ?? '—'} vừa được phân công cho bạn.`,
+        type: 'MAINTENANCE',
+        link: '/staff',
+      });
+    } catch (err) {
+      console.error('Lỗi gửi thông báo phân công bảo trì:', err);
+    }
+
+    return { message: `Đã phân công cho ${staff.fullName}.`, request };
+  }
+
+  async updateStatus(
+    requestId: string,
+    status: string,
+    actor?: { userId: string; role: string },
+  ) {
     if (!isValidObjectId(requestId))
       throw new BadRequestException('ID không hợp lệ');
 
@@ -169,6 +226,16 @@ export class MaintenanceService {
 
     const request = await this.maintenanceModel.findById(requestId);
     if (!request) throw new NotFoundException('Không tìm thấy yêu cầu này');
+
+    // Nhân viên bảo trì chỉ được cập nhật yêu cầu đã phân công cho chính mình
+    if (
+      actor?.role === 'MAINTENANCE_STAFF' &&
+      request.assignedTo?.toString() !== actor.userId
+    ) {
+      throw new ForbiddenException(
+        'Bạn chỉ có thể cập nhật yêu cầu được phân công cho mình.',
+      );
+    }
 
     // Ghi nhận việc CHUYỂN sang RESOLVED (chỉ khi trước đó chưa RESOLVED)
     // để không gửi trùng thông báo mỗi lần bấm cập nhật lại.

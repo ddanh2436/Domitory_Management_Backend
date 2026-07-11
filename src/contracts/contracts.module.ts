@@ -5,6 +5,7 @@ import { ContractsController } from './contracts.controller';
 import { Contract, ContractSchema } from './schemas/contract.schema';
 import { Room, RoomSchema } from '../rooms/schemas/room.schema';
 import { User, UserSchema } from '../users/schemas/user.schema';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { User, UserSchema } from '../users/schemas/user.schema';
       { name: Room.name, schema: RoomSchema },
       { name: User.name, schema: UserSchema },
     ]),
+    NotificationsModule,
   ],
   controllers: [ContractsController],
   providers: [ContractsService],

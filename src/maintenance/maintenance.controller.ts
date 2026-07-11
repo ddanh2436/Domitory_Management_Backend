@@ -72,6 +72,21 @@ export class MaintenanceController {
     return this.maintenanceService.getAllRequests();
   }
 
+  // Nhân viên bảo trì xem các yêu cầu được phân công cho mình
+  @Get('assigned/me')
+  @Roles('MAINTENANCE_STAFF')
+  getAssignedToMe(@Req() req: any) {
+    const userId = req.user?.sub || req.user?.userId || req.user?._id || req.user?.id;
+    return this.maintenanceService.getAssignedRequests(userId);
+  }
+
+  // Admin phân công yêu cầu cho nhân viên bảo trì
+  @Patch(':id/assign')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
+  assign(@Param('id') id: string, @Body('staffId') staffId: string) {
+    return this.maintenanceService.assignRequest(id, staffId);
+  }
+
   @Get('stats/status')
   @Roles('ADMIN', 'DORMITORY_MANAGER')
   getStatusStats() {
@@ -79,8 +94,12 @@ export class MaintenanceController {
   }
 
   @Patch(':id/status')
-  @Roles('ADMIN', 'DORMITORY_MANAGER')
-  updateStatus(@Param('id') id: string, @Body('status') status: string) {
-    return this.maintenanceService.updateStatus(id, status);
+  @Roles('ADMIN', 'DORMITORY_MANAGER', 'MAINTENANCE_STAFF')
+  updateStatus(@Param('id') id: string, @Body('status') status: string, @Req() req: any) {
+    const userId = req.user?.sub || req.user?.userId || req.user?._id || req.user?.id;
+    return this.maintenanceService.updateStatus(id, status, {
+      userId,
+      role: req.user?.role,
+    });
   }
 }
