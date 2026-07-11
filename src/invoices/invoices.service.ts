@@ -136,6 +136,121 @@ export class InvoicesService {
     }
   }
 
+  // ─── 1b. Sinh hóa đơn hàng loạt theo chỉ số điện nước ──────────────────────
+
+  async generateBulkInvoices(dto: {
+    month: number;
+    year: number;
+    dueDate: string;
+    electricityUnitPrice: number;
+    waterUnitPrice: number;
+    readings: { roomId: string; electricityKwh: number; waterM3: number }[];
+  }) {
+    const month = Number(dto.month);
+    const year = Number(dto.year);
+    const electricityUnitPrice = Number(dto.electricityUnitPrice);
+    const waterUnitPrice = Number(dto.waterUnitPrice);
+
+    if (!Number.isInteger(month) || month < 1 || month > 12) {
+      throw new BadRequestException('Tháng phải là số nguyên từ 1 đến 12');
+    }
+    if (!Number.isInteger(year) || year < 2020 || year > 2100) {
+      throw new BadRequestException('Năm không hợp lệ');
+    }
+    if (
+      !Number.isFinite(electricityUnitPrice) ||
+      electricityUnitPrice < 0 ||
+      !Number.isFinite(waterUnitPrice) ||
+      waterUnitPrice < 0
+    ) {
+      throw new BadRequestException('Đơn giá điện/nước không hợp lệ');
+    }
+    if (!Array.isArray(dto.readings) || dto.readings.length === 0) {
+      throw new BadRequestException('Vui lòng nhập chỉ số cho ít nhất một phòng');
+    }
+
+    const parsedDueDate = this.parseDueDate(dto.dueDate);
+
+    let created = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+    const notifyRoomIds: Types.ObjectId[] = [];
+
+    for (const reading of dto.readings) {
+      const kwh = Number(reading.electricityKwh);
+      const m3 = Number(reading.waterM3);
+
+      if (!isValidObjectId(reading.roomId) || !Number.isFinite(kwh) || kwh < 0 || !Number.isFinite(m3) || m3 < 0) {
+        skipped += 1;
+        errors.push(`Chỉ số không hợp lệ cho phòng ${reading.roomId}`);
+        continue;
+      }
+
+      const room = await this.roomModel.findById(reading.roomId).lean();
+      if (!room) {
+        skipped += 1;
+        errors.push(`Không tìm thấy phòng ${reading.roomId}`);
+        continue;
+      }
+
+      const electricityFee = Math.round(kwh * electricityUnitPrice);
+      const waterFee = Math.round(m3 * waterUnitPrice);
+
+      try {
+        await this.invoiceModel.create({
+          room: room._id,
+          month,
+          year,
+          roomFee: room.price,
+          electricityFee,
+          waterFee,
+          totalAmount: room.price + electricityFee + waterFee,
+          dueDate: parsedDueDate,
+          status: InvoiceStatus.PENDING,
+        });
+        created += 1;
+        notifyRoomIds.push(room._id as Types.ObjectId);
+      } catch (error: any) {
+        // Unique index (room, month, year): phòng đã có hóa đơn kỳ này thì bỏ qua
+        if (error?.code === 11000) {
+          skipped += 1;
+          errors.push(`Phòng "${room.name}" đã có hóa đơn tháng ${month}/${year}`);
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    // Báo cho sinh viên trong các phòng vừa phát hành hóa đơn — lỗi thông báo
+    // không được làm hỏng kết quả sinh hóa đơn.
+    if (notifyRoomIds.length > 0) {
+      try {
+        const students = await this.userModel
+          .find({ room: { $in: notifyRoomIds } })
+          .select('_id')
+          .lean();
+        for (const student of students) {
+          await this.notificationsService.createAndSend({
+            recipient: student._id.toString(),
+            title: `Hóa đơn tháng ${month}/${year} đã phát hành 🧾`,
+            message: `Hóa đơn tiền phòng và điện nước của phòng bạn đã được tạo. Hạn đóng: ${this.formatDateTime(parsedDueDate)}.`,
+            type: 'INVOICE',
+            link: '/student/invoices',
+          });
+        }
+      } catch (err) {
+        console.error('Lỗi gửi thông báo hóa đơn hàng loạt:', err);
+      }
+    }
+
+    return {
+      message: `Đã tạo ${created} hóa đơn tháng ${month}/${year}${skipped > 0 ? `, bỏ qua ${skipped} phòng` : ''}.`,
+      created,
+      skipped,
+      errors,
+    };
+  }
+
   // ─── 2. Lấy danh sách hóa đơn (có filter + pagination) ─────────────────────
 
   async getAllInvoices(

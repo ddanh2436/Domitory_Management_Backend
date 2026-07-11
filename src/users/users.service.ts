@@ -57,6 +57,15 @@ export class UsersService {
     return updatedUser;
   }
 
+  // Danh sách nhân viên bảo trì đang hoạt động (để phân công việc)
+  async findMaintenanceStaff() {
+    return this.userModel
+      .find({ role: 'MAINTENANCE_STAFF', accessStatus: { $ne: 'LOCKED' } })
+      .select('fullName email phone')
+      .sort({ fullName: 1 })
+      .lean();
+  }
+
   // Chỉnh sửa findAllStudents để populate thêm dữ liệu phòng
   async findAllStudents() {
     return this.userModel

@@ -28,6 +28,23 @@ export class InvoicesController {
     return this.invoicesService.createInvoice(createInvoiceDto);
   }
 
+  // 1b. Admin sinh hóa đơn hàng loạt theo chỉ số điện nước từng phòng
+  @Post('generate-bulk')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
+  generateBulk(
+    @Body()
+    body: {
+      month: number;
+      year: number;
+      dueDate: string;
+      electricityUnitPrice: number;
+      waterUnitPrice: number;
+      readings: { roomId: string; electricityKwh: number; waterM3: number }[];
+    },
+  ) {
+    return this.invoicesService.generateBulkInvoices(body);
+  }
+
   // 2. Admin xem danh sách toàn bộ hóa đơn (Có phân trang & Lọc)
   @Get()
   @Roles('ADMIN', 'DORMITORY_MANAGER')

@@ -31,6 +31,10 @@ export class Contract {
 
   @Prop({ required: true })
   terms!: string; // Các điều khoản quy định kí kết
+
+  // Lần gần nhất hệ thống nhắc "hợp đồng sắp hết hạn" — tránh spam mỗi ngày
+  @Prop()
+  lastReminderAt?: Date;
 }
 
 export const ContractSchema = SchemaFactory.createForClass(Contract);
