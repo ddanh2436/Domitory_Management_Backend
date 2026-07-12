@@ -7,6 +7,7 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { isValidObjectId, Model, Types } from 'mongoose';
 import { Notification, NotificationDocument } from './schemas/notification.schema';
+import { Announcement, AnnouncementDocument } from './schemas/announcement.schema';
 import { NotificationsGateway } from './notifications.gateway';
 import { User, UserDocument } from '../users/schemas/user.schema';
 
@@ -17,6 +18,7 @@ export class NotificationsService implements OnModuleInit {
 
   constructor(
     @InjectModel(Notification.name) private notifModel: Model<NotificationDocument>,
+    @InjectModel(Announcement.name) private announcementModel: Model<AnnouncementDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     private readonly gateway: NotificationsGateway,
   ) {}
@@ -113,9 +115,19 @@ export class NotificationsService implements OnModuleInit {
     return { message: 'Đã đánh dấu tất cả là đã đọc.', modified: result.modifiedCount };
   }
 
+  // Lịch sử các thông báo chung đã gửi (mới nhất trước)
+  async getBroadcastHistory() {
+    return this.announcementModel
+      .find()
+      .populate('sentBy', 'fullName email')
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+  }
+
   // Gửi thông báo cho TOÀN BỘ sinh viên: lưu mỗi người một bản ghi rồi bắn socket riêng
   // để badge/danh sách của từng người đều chính xác.
-  async broadcastToStudents(data: { title: string; message: string; link?: string }) {
+  async broadcastToStudents(data: { title: string; message: string; link?: string; senderId?: string }) {
     if (!data.title?.trim() || !data.message?.trim()) {
       throw new BadRequestException('Vui lòng nhập đầy đủ tiêu đề và nội dung.');
     }
@@ -143,6 +155,18 @@ export class NotificationsService implements OnModuleInit {
 
     for (const doc of docs) {
       this.gateway.sendToUser(String(doc.recipient), doc);
+    }
+
+    // Lưu lịch sử để admin xem lại — lỗi lưu lịch sử không làm hỏng việc gửi
+    try {
+      await this.announcementModel.create({
+        title: data.title.trim(),
+        message: data.message.trim(),
+        sentBy: data.senderId ? new Types.ObjectId(data.senderId) : undefined,
+        sentCount: docs.length,
+      });
+    } catch (err) {
+      console.error('Lỗi lưu lịch sử thông báo:', err);
     }
 
     return { message: `Đã gửi thông báo đến ${docs.length} sinh viên.`, sent: docs.length };

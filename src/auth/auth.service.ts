@@ -10,9 +10,11 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
+import * as crypto from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { User, UserDocument } from '../users/schemas/user.schema';
 import { LoginDto, RegisterDto } from './dto/auth.dto';
+import { MailService } from './mail.service';
 
 @Injectable()
 export class AuthService {
@@ -24,6 +26,7 @@ export class AuthService {
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
     private jwtService: JwtService,
+    private mailService: MailService,
   ) {}
 
   // 1. Hàm Đăng ký thủ công
@@ -183,6 +186,77 @@ export class AuthService {
       }
       throw new UnauthorizedException('Xác thực Google thất bại');
     }
+  }
+
+  // 4a. Quên mật khẩu: sinh token 15 phút và gửi link đặt lại qua email
+  async forgotPassword(email: string) {
+    const user = await this.userModel.findOne({ email });
+
+    // Luôn trả về cùng một thông điệp dù email có tồn tại hay không,
+    // tránh để lộ danh sách email đã đăng ký (user enumeration).
+    const genericResponse = {
+      message:
+        'Nếu email này đã đăng ký, một liên kết đặt lại mật khẩu vừa được gửi đến hộp thư của bạn. Vui lòng kiểm tra cả mục Spam.',
+    };
+
+    if (!user) return genericResponse;
+
+    // Token thô chỉ nằm trong email; database chỉ lưu SHA-256 hash —
+    // lộ database cũng không dùng được token để chiếm tài khoản.
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expires = new Date(Date.now() + 15 * 60 * 1000); // 15 phút
+
+    user.set('resetPasswordToken', tokenHash);
+    user.set('resetPasswordExpires', expires);
+    await user.save();
+
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetLink = `${frontendUrl}/reset-password?token=${token}`;
+
+    try {
+      await this.mailService.sendPasswordResetEmail(
+        user.email,
+        user.fullName,
+        resetLink,
+      );
+    } catch (err) {
+      console.error('Lỗi gửi email đặt lại mật khẩu:', err);
+      throw new BadRequestException(
+        'Không gửi được email lúc này. Vui lòng thử lại sau.',
+      );
+    }
+
+    return genericResponse;
+  }
+
+  // 4b. Đặt lại mật khẩu bằng token nhận qua email
+  async resetPassword(token: string, newPassword: string) {
+    // So sánh bằng hash — khớp với dạng đã lưu ở forgotPassword
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    const user = await this.userModel
+      .findOne({
+        resetPasswordToken: tokenHash,
+        resetPasswordExpires: { $gt: new Date() },
+      })
+      .select('+resetPasswordToken +resetPasswordExpires');
+
+    if (!user) {
+      throw new BadRequestException(
+        'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Vui lòng yêu cầu lại.',
+      );
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.passwordHash = await bcrypt.hash(newPassword, salt);
+    user.set('resetPasswordToken', undefined);
+    user.set('resetPasswordExpires', undefined);
+    await user.save();
+
+    return {
+      message: 'Mật khẩu đã được đặt lại thành công! Hãy đăng nhập bằng mật khẩu mới.',
+    };
   }
 
   // 4. Hàm đặt lại mật khẩu trực tiếp cho Sandbox

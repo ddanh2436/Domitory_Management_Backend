@@ -49,11 +49,18 @@ export class NotificationsController {
     return this.notificationsService.deleteMyNotification(id, req.user.sub);
   }
 
+  // Lịch sử các thông báo chung đã gửi
+  @Get('broadcast/history')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
+  getBroadcastHistory() {
+    return this.notificationsService.getBroadcastHistory();
+  }
+
   // Gửi thông báo chung đến TOÀN BỘ sinh viên (chỉ quản lý cấp cao)
   @Post('broadcast')
   @Roles('ADMIN', 'DORMITORY_MANAGER')
-  broadcast(@Body() body: { title: string; message: string; link?: string }) {
-    return this.notificationsService.broadcastToStudents(body);
+  broadcast(@Req() req: any, @Body() body: { title: string; message: string; link?: string }) {
+    return this.notificationsService.broadcastToStudents({ ...body, senderId: req.user.sub });
   }
 
   // Endpoint để nhận yêu cầu tạo thông báo từ Frontend
