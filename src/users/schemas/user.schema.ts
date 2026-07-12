@@ -57,6 +57,13 @@ export class User {
 
   @Prop({ type: Types.ObjectId, ref: 'Room' })
   room?: Types.ObjectId;
+
+  // Token đặt lại mật khẩu (flow quên mật khẩu qua email) — không trả về trong query thường
+  @Prop({ select: false })
+  resetPasswordToken?: string;
+
+  @Prop({ select: false })
+  resetPasswordExpires?: Date;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

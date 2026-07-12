@@ -42,6 +42,21 @@ export class LoginDto {
   password!: string;
 }
 
+export class ForgotPasswordDto {
+  @IsEmail({}, { message: 'Email không đúng định dạng' })
+  email!: string;
+}
+
+export class ResetPasswordDto {
+  @IsString()
+  @IsNotEmpty({ message: 'Thiếu mã đặt lại mật khẩu' })
+  token!: string;
+
+  @IsString()
+  @MinLength(6, { message: 'Mật khẩu mới phải có ít nhất 6 ký tự' })
+  newPassword!: string;
+}
+
 export class ResetPasswordSandboxDto {
   @IsEmail({}, { message: 'Email không đúng định dạng' })
   email!: string;

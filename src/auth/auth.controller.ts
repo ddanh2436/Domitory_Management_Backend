@@ -1,6 +1,12 @@
 import { Body, Controller, Post, HttpCode, HttpStatus } from '@nestjs/common';
 import { AuthService } from './auth.service';
-import { LoginDto, RegisterDto, ResetPasswordSandboxDto } from './dto/auth.dto';
+import {
+  ForgotPasswordDto,
+  LoginDto,
+  RegisterDto,
+  ResetPasswordDto,
+  ResetPasswordSandboxDto,
+} from './dto/auth.dto';
 
 @Controller('api/auth')
 export class AuthController {
@@ -21,6 +27,20 @@ export class AuthController {
   @Post('google')
   googleLogin(@Body('token') token: string) {
     return this.authService.googleLogin(token);
+  }
+
+  // Quên mật khẩu: gửi link đặt lại qua email (token 15 phút)
+  @HttpCode(HttpStatus.OK)
+  @Post('forgot-password')
+  forgotPassword(@Body() body: ForgotPasswordDto) {
+    return this.authService.forgotPassword(body.email);
+  }
+
+  // Đặt lại mật khẩu bằng token nhận qua email
+  @HttpCode(HttpStatus.OK)
+  @Post('reset-password')
+  resetPassword(@Body() body: ResetPasswordDto) {
+    return this.authService.resetPassword(body.token, body.newPassword);
   }
 
   // TÍNH NĂNG MỚI: Quên mật khẩu (Sandbox — đã bị vô hiệu hóa trên production)
