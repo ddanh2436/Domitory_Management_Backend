@@ -193,6 +193,16 @@ export class InvoicesService {
         continue;
       }
 
+      // Check trùng tường minh — không phụ thuộc unique index có tồn tại trong DB hay không
+      const duplicate = await this.invoiceModel
+        .findOne({ room: room._id, month, year })
+        .lean();
+      if (duplicate) {
+        skipped += 1;
+        errors.push(`Phòng "${room.name}" đã có hóa đơn tháng ${month}/${year}`);
+        continue;
+      }
+
       const electricityFee = Math.round(kwh * electricityUnitPrice);
       const waterFee = Math.round(m3 * waterUnitPrice);
 

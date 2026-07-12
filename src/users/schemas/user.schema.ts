@@ -26,10 +26,12 @@ export class User {
   @Prop({ required: true, select: false })
   passwordHash!: string;
 
-  @Prop({ required: true, enum: USER_ROLES, default: 'STUDENT' })
+  // type: String khai báo tường minh vì union type không suy ra được
+  // dưới ts-jest (thiếu metadata) — build chạy được nhưng jest sẽ fail nếu thiếu
+  @Prop({ type: String, required: true, enum: USER_ROLES, default: 'STUDENT' })
   role!: UserRole;
 
-  @Prop({ required: true, enum: USER_ACCESS_STATUSES, default: 'ACTIVE' })
+  @Prop({ type: String, required: true, enum: USER_ACCESS_STATUSES, default: 'ACTIVE' })
   accessStatus!: UserAccessStatus;
 
   // TÍNH NĂNG MỚI: Thêm trường lưu lý do khóa tài khoản
