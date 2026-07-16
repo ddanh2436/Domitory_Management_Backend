@@ -548,4 +548,145 @@ export class InvoicesService {
       }))
       .slice(-6);
   }
+
+  // ─── FR23: Theo dõi công nợ ────────────────────────────────────────────────
+  // Tổng hợp các hóa đơn chưa thanh toán (PENDING/OVERDUE) theo từng phòng,
+  // kèm danh sách sinh viên đang ở để admin biết nhắc ai.
+  async getDebtSummary() {
+    const debts = await this.invoiceModel.aggregate([
+      {
+        $match: {
+          status: { $in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] },
+        },
+      },
+      {
+        $group: {
+          _id: '$room',
+          totalDebt: { $sum: '$totalAmount' },
+          invoiceCount: { $sum: 1 },
+          overdueCount: {
+            $sum: {
+              $cond: [{ $eq: ['$status', InvoiceStatus.OVERDUE] }, 1, 0],
+            },
+          },
+          oldestDueDate: { $min: '$dueDate' },
+        },
+      },
+      { $sort: { totalDebt: -1 } },
+    ]);
+
+    const roomIds = debts.map((d) => d._id as Types.ObjectId);
+    const [rooms, occupants] = await Promise.all([
+      this.roomModel
+        .find({ _id: { $in: roomIds } })
+        .select('name building floor')
+        .lean(),
+      this.userModel
+        .find({ room: { $in: roomIds }, role: 'STUDENT' })
+        .select('fullName mssv room')
+        .lean(),
+    ]);
+
+    const roomMap = new Map(rooms.map((r) => [r._id.toString(), r]));
+    const occupantMap = new Map<string, { fullName: string; mssv?: string }[]>();
+    for (const o of occupants) {
+      const key = o.room!.toString();
+      if (!occupantMap.has(key)) occupantMap.set(key, []);
+      occupantMap.get(key)!.push({ fullName: o.fullName, mssv: o.mssv });
+    }
+
+    const roomsWithDebt = debts.map((d) => {
+      const roomId = (d._id as Types.ObjectId).toString();
+      const room = roomMap.get(roomId);
+      return {
+        roomId,
+        roomName: room?.name ?? '—',
+        building: room?.building ?? '—',
+        floor: room?.floor ?? null,
+        occupants: occupantMap.get(roomId) ?? [],
+        totalDebt: d.totalDebt as number,
+        invoiceCount: d.invoiceCount as number,
+        overdueCount: d.overdueCount as number,
+        oldestDueDate: (d.oldestDueDate as Date | null) ?? null,
+      };
+    });
+
+    return {
+      totalDebt: roomsWithDebt.reduce((sum, r) => sum + r.totalDebt, 0),
+      roomCount: roomsWithDebt.length,
+      totalUnpaidInvoices: roomsWithDebt.reduce(
+        (sum, r) => sum + r.invoiceCount,
+        0,
+      ),
+      totalOverdueInvoices: roomsWithDebt.reduce(
+        (sum, r) => sum + r.overdueCount,
+        0,
+      ),
+      rooms: roomsWithDebt,
+    };
+  }
+
+  // Nhắc nợ một phòng: gửi thông báo đến toàn bộ sinh viên đang ở phòng đó
+  async remindDebtForRoom(roomId: string): Promise<{ message: string; notified: number }> {
+    this.validateObjectId(roomId, 'roomId');
+
+    const unpaid = await this.invoiceModel
+      .find({
+        room: new Types.ObjectId(roomId),
+        status: { $in: [InvoiceStatus.PENDING, InvoiceStatus.OVERDUE] },
+      })
+      .select('totalAmount month year')
+      .lean();
+
+    if (unpaid.length === 0) {
+      throw new NotFoundException('Phòng này không còn hóa đơn nợ nào.');
+    }
+
+    const totalDebt = unpaid.reduce((sum, i) => sum + i.totalAmount, 0);
+    const students = await this.userModel
+      .find({ room: new Types.ObjectId(roomId), role: 'STUDENT' })
+      .select('_id')
+      .lean();
+
+    const results = await Promise.allSettled(
+      students.map((student) =>
+        this.notificationsService.createAndSend({
+          recipient: student._id.toString(),
+          title: 'Nhắc nhở thanh toán công nợ 💰',
+          message: `Phòng bạn đang còn ${unpaid.length} hóa đơn chưa thanh toán, tổng cộng ${this.formatCurrency(totalDebt)}. Vui lòng thanh toán sớm để tránh bị xử lý theo nội quy.`,
+          type: 'INVOICE',
+          link: '/student/invoices',
+        }),
+      ),
+    );
+
+    const notified = results.filter((r) => r.status === 'fulfilled').length;
+    return {
+      message: `Đã gửi nhắc nợ đến ${notified} sinh viên của phòng.`,
+      notified,
+    };
+  }
+
+  // Nhắc nợ toàn bộ các phòng đang có công nợ
+  async remindAllDebts(): Promise<{ message: string; roomsReminded: number; notified: number }> {
+    const summary = await this.getDebtSummary();
+    let notified = 0;
+    let roomsReminded = 0;
+
+    for (const room of summary.rooms) {
+      try {
+        const result = await this.remindDebtForRoom(room.roomId);
+        notified += result.notified;
+        roomsReminded += 1;
+      } catch (err) {
+        console.error(`Lỗi nhắc nợ phòng ${room.roomName}:`, err);
+      }
+    }
+
+    return {
+      message: `Đã nhắc nợ ${roomsReminded} phòng (${notified} sinh viên nhận được thông báo).`,
+      roomsReminded,
+      notified,
+    };
+  }
 }

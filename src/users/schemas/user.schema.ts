@@ -47,6 +47,10 @@ export class User {
   @Prop()
   cccd?: string;
 
+  // Giới tính — dùng cho phân phòng tự động (FR12); dữ liệu cũ có thể chưa có
+  @Prop({ type: String, enum: ['MALE', 'FEMALE'] })
+  gender?: 'MALE' | 'FEMALE';
+
   @Prop()
   avatar?: string;
 

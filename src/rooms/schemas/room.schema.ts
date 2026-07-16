@@ -37,6 +37,15 @@ export class Room {
 
   @Prop({ type: [String], default: [] })
   facilities!: string[];
+
+  // Loại phòng theo giới tính — dùng cho phân phòng tự động (FR12).
+  // MIXED = không phân biệt (mặc định cho dữ liệu cũ).
+  @Prop({
+    type: String,
+    enum: ['MALE', 'FEMALE', 'MIXED'],
+    default: 'MIXED',
+  })
+  genderType!: 'MALE' | 'FEMALE' | 'MIXED';
 }
 
 export const RoomSchema = SchemaFactory.createForClass(Room);

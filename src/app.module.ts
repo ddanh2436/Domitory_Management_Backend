@@ -14,6 +14,8 @@ import { ViolationsModule } from './violations/violations.module';
 import { TransfersModule } from './transfers/transfers.module';
 import { AbsencesModule } from './absences/absences.module';
 import { CheckoutsModule } from './checkouts/checkouts.module';
+import { AssignmentsModule } from './assignments/assignments.module';
+import { AuditLogsModule } from './audit-logs/audit-logs.module';
 
 @Module({
   imports: [
@@ -40,6 +42,8 @@ import { CheckoutsModule } from './checkouts/checkouts.module';
     TransfersModule,
     AbsencesModule,
     CheckoutsModule,
+    AssignmentsModule,
+    AuditLogsModule,
   ],
 })
 export class AppModule {}

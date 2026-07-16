@@ -83,6 +83,27 @@ export class InvoicesController {
     return this.invoicesService.markOverdueInvoices();
   }
 
+  // FR23: Tổng hợp công nợ theo phòng (hóa đơn PENDING/OVERDUE)
+  @Get('debts')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
+  getDebts() {
+    return this.invoicesService.getDebtSummary();
+  }
+
+  // FR23: Nhắc nợ toàn bộ phòng đang nợ
+  @Post('debts/remind-all')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
+  remindAllDebts() {
+    return this.invoicesService.remindAllDebts();
+  }
+
+  // FR23: Nhắc nợ một phòng cụ thể
+  @Post('debts/:roomId/remind')
+  @Roles('ADMIN', 'DORMITORY_MANAGER')
+  remindDebt(@Param('roomId') roomId: string) {
+    return this.invoicesService.remindDebtForRoom(roomId);
+  }
+
   @Patch(':id/pay-mock')
   @Roles('STUDENT')
   mockPayInvoice(@Param('id') id: string, @Req() req: any) {
