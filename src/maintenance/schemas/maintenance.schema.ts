@@ -4,6 +4,33 @@ import { MaintenanceStatus, MaintenancePriority } from '../maintenance.enum';
 
 export type MaintenanceDocument = Maintenance & Document;
 
+// Một mốc trong nhật ký đổi trạng thái của yêu cầu bảo trì.
+// Denormalize tên + vai trò người thực hiện để hiển thị nhật ký không cần populate.
+@Schema({ _id: false })
+export class StatusHistoryEntry {
+  @Prop({ required: true, enum: Object.values(MaintenanceStatus) })
+  status!: string;
+
+  // Ghi chú kèm mốc: lý do từ chối hoặc nội dung đã xử lý
+  @Prop()
+  note?: string;
+
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  changedBy?: Types.ObjectId;
+
+  @Prop()
+  changedByName?: string;
+
+  @Prop()
+  changedByRole?: string;
+
+  @Prop({ required: true, default: Date.now })
+  at!: Date;
+}
+
+export const StatusHistoryEntrySchema =
+  SchemaFactory.createForClass(StatusHistoryEntry);
+
 @Schema({ timestamps: true })
 export class Maintenance {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true })
@@ -50,6 +77,18 @@ export class Maintenance {
 
   @Prop()
   ratedAt?: Date;
+
+  // Lý do từ chối — bắt buộc (ở tầng service) khi status chuyển sang REJECTED
+  @Prop({ maxlength: 500 })
+  rejectionReason?: string;
+
+  // Nội dung nhân viên đã xử lý — nhập tùy chọn khi hoàn thành (RESOLVED)
+  @Prop({ maxlength: 500 })
+  resolutionNote?: string;
+
+  // Nhật ký các lần đổi trạng thái (mới nhất được đẩy vào cuối mảng)
+  @Prop({ type: [StatusHistoryEntrySchema], default: [] })
+  statusHistory!: StatusHistoryEntry[];
 }
 
 export const MaintenanceSchema = SchemaFactory.createForClass(Maintenance);

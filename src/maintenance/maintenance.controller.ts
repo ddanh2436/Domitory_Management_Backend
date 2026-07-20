@@ -17,6 +17,7 @@ import type { MaintenanceImageFile } from './maintenance.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
+import { UpdateStatusDto } from './dto/update-status.dto';
 
 @Controller('api/maintenance')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -95,11 +96,17 @@ export class MaintenanceController {
 
   @Patch(':id/status')
   @Roles('ADMIN', 'DORMITORY_MANAGER', 'MAINTENANCE_STAFF')
-  updateStatus(@Param('id') id: string, @Body('status') status: string, @Req() req: any) {
+  updateStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateStatusDto,
+    @Req() req: any,
+  ) {
     const userId = req.user?.sub || req.user?.userId || req.user?._id || req.user?.id;
-    return this.maintenanceService.updateStatus(id, status, {
+    return this.maintenanceService.updateStatus(id, dto.status, {
       userId,
       role: req.user?.role,
+      note: dto.note,
+      rejectionReason: dto.rejectionReason,
     });
   }
 }
