@@ -213,7 +213,12 @@ export class MaintenanceService {
   async updateStatus(
     requestId: string,
     status: string,
-    actor?: { userId: string; role: string },
+    actor?: {
+      userId: string;
+      role: string;
+      note?: string;
+      rejectionReason?: string;
+    },
   ) {
     if (!isValidObjectId(requestId))
       throw new BadRequestException('ID không hợp lệ');
@@ -237,16 +242,56 @@ export class MaintenanceService {
       );
     }
 
+    // Từ chối bắt buộc phải kèm lý do (áp dụng cho cả nhân viên lẫn ban quản lý)
+    const rejectionReason = actor?.rejectionReason?.trim();
+    if (status === MaintenanceStatus.REJECTED && !rejectionReason) {
+      throw new BadRequestException('Vui lòng nhập lý do từ chối');
+    }
+
     // Ghi nhận việc CHUYỂN sang RESOLVED (chỉ khi trước đó chưa RESOLVED)
     // để không gửi trùng thông báo mỗi lần bấm cập nhật lại.
     const justResolved =
       status === MaintenanceStatus.RESOLVED &&
       request.status !== MaintenanceStatus.RESOLVED;
 
+    const resolutionNote = actor?.note?.trim();
+
     const updateData: any = { status };
     if (justResolved) {
       updateData.resolvedAt = new Date();
     }
+    if (status === MaintenanceStatus.RESOLVED && resolutionNote) {
+      updateData.resolutionNote = resolutionNote;
+    }
+    if (status === MaintenanceStatus.REJECTED) {
+      updateData.rejectionReason = rejectionReason;
+    }
+
+    // Ghi một mốc vào nhật ký đổi trạng thái. Lấy tên người thực hiện để
+    // hiển thị nhật ký mà không cần populate về sau.
+    let actorName: string | undefined;
+    if (actor?.userId && isValidObjectId(actor.userId)) {
+      const actorUser = await this.userModel
+        .findById(actor.userId)
+        .select('fullName')
+        .lean();
+      actorName = actorUser?.fullName;
+    }
+    const historyNote =
+      status === MaintenanceStatus.REJECTED ? rejectionReason : resolutionNote;
+    updateData.$push = {
+      statusHistory: {
+        status,
+        note: historyNote,
+        changedBy:
+          actor?.userId && isValidObjectId(actor.userId)
+            ? new Types.ObjectId(actor.userId)
+            : undefined,
+        changedByName: actorName,
+        changedByRole: actor?.role,
+        at: new Date(),
+      },
+    };
 
     const updatedRequest = await this.maintenanceModel.findByIdAndUpdate(
       requestId,
@@ -266,6 +311,24 @@ export class MaintenanceService {
         });
       } catch (err) {
         console.error('Lỗi gửi thông báo hoàn tất bảo trì:', err);
+      }
+    }
+
+    // Báo cho sinh viên biết yêu cầu bị từ chối kèm lý do
+    if (
+      status === MaintenanceStatus.REJECTED &&
+      request.status !== MaintenanceStatus.REJECTED
+    ) {
+      try {
+        await this.notificationsService.createAndSend({
+          recipient: request.user.toString(),
+          title: 'Yêu cầu bảo trì bị từ chối',
+          message: `Sự cố "${request.title}" đã bị từ chối. Lý do: ${rejectionReason}`,
+          type: 'MAINTENANCE',
+          link: '/student/maintenance',
+        });
+      } catch (err) {
+        console.error('Lỗi gửi thông báo từ chối bảo trì:', err);
       }
     }
 
