@@ -16,6 +16,7 @@ import { AbsencesModule } from './absences/absences.module';
 import { CheckoutsModule } from './checkouts/checkouts.module';
 import { AssignmentsModule } from './assignments/assignments.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
+import { ChatbotModule } from './chatbot/chatbot.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { AuditLogsModule } from './audit-logs/audit-logs.module';
     CheckoutsModule,
     AssignmentsModule,
     AuditLogsModule,
+    ChatbotModule,
   ],
 })
 export class AppModule {}
