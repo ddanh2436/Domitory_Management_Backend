@@ -7,6 +7,14 @@ import * as path from 'path';
 
 @Injectable()
 export class ChatbotService {
+  // Cấu hình qua biến môi trường (có mặc định để chạy local ngay không cần .env).
+  // Đổi model chỉ cần set CHAT_MODEL trong .env, không phải sửa code.
+  private readonly ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
+  private readonly chatModel = process.env.CHAT_MODEL || 'qwen2.5:3b';
+  private readonly embedModel = process.env.EMBED_MODEL || 'nomic-embed-text';
+  // Ngưỡng điểm tương đồng (0..1). Kết quả dưới ngưỡng bị coi là không liên quan.
+  private readonly scoreThreshold = Number(process.env.CHATBOT_SCORE_THRESHOLD ?? 0.6);
+
   constructor(
     @InjectModel(Knowledge.name) private knowledgeModel: Model<Knowledge>
   ) {}
@@ -14,11 +22,11 @@ export class ChatbotService {
   // 1. Gọi Ollama để biến câu chữ thành Vector số
   async getEmbedding(text: string): Promise<number[]> {
     try {
-      const response = await fetch('http://localhost:11434/api/embeddings', {
+      const response = await fetch(`${this.ollamaUrl}/api/embeddings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'nomic-embed-text', // Model nhúng của Ollama
+          model: this.embedModel, // Model nhúng của Ollama
           prompt: text,
         }),
       });
@@ -31,7 +39,8 @@ export class ChatbotService {
     }
   }
 
-  // 2. Tìm kiếm nội dung liên quan trong MongoDB
+  // 2. Tìm kiếm nội dung liên quan trong MongoDB.
+  // Trả về chuỗi tài liệu ghép lại, hoặc "" nếu không có đoạn nào đủ liên quan.
   async searchKnowledge(queryText: string): Promise<string> {
     const queryVector = await this.getEmbedding(queryText);
 
@@ -39,7 +48,7 @@ export class ChatbotService {
     const results = await this.knowledgeModel.aggregate([
       {
         $vectorSearch: {
-          index: "vector_index", // Tên Index sẽ tạo trên MongoDB Atlas
+          index: "vector_index", // Tên Index đã tạo trên MongoDB Atlas
           path: "embedding", // Cột chứa vector
           queryVector: queryVector,
           numCandidates: 10,
@@ -51,36 +60,51 @@ export class ChatbotService {
       }
     ]);
 
-    if (results.length === 0) return "Không tìm thấy dữ liệu liên quan.";
-    return results.map(r => r.content).join("\n\n---\n\n");
+    // Lọc bỏ các đoạn điểm thấp: câu chào hỏi / ngoài phạm vi vẫn luôn trả về 3 kết quả
+    // vô nghĩa, khiến model bị "lú" và trả lời lạc đề. Chỉ giữ đoạn thực sự liên quan.
+    const relevant = results.filter(r => r.score >= this.scoreThreshold);
+
+    if (relevant.length === 0) return "";
+    return relevant.map(r => r.content).join("\n\n---\n\n");
   }
 
-  // 3. RAG Pipeline: Ép model Gemma trả lời theo Context
+  // 3. RAG Pipeline: Ép model trả lời theo Context
   async getChatResponse(userMessage: string): Promise<string> {
     try {
-      // Bóc tách tài liệu từ DB
+      // Bóc tách tài liệu từ DB ("" nếu không có đoạn nào đủ liên quan)
       const context = await this.searchKnowledge(userMessage);
 
-      // Tạo prompt nhốt AI vào khuôn khổ
-      const fullPrompt = `Bạn là trợ lý ảo của hệ thống ký túc xá Dormify.
-Hãy trả lời sinh viên ngắn gọn, thân thiện và chính xác dựa HOÀN TOÀN vào tài liệu sau đây:
+      // Chọn prompt theo việc có tìm được tài liệu liên quan hay không.
+      // Tách 2 nhánh để câu chào hỏi / xã giao không bị nhồi tài liệu vô nghĩa.
+      const fullPrompt = context
+        ? `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
+Hãy trả lời sinh viên ngắn gọn, thân thiện và chính xác, CHỈ dựa vào tài liệu sau đây:
 <tai_lieu>
 ${context}
 </tai_lieu>
 
-Nếu câu hỏi nằm ngoài tài liệu, hãy nói: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này." Tuyệt đối không tự bịa ra thông tin.
+Nếu tài liệu không đủ để trả lời, hãy nói: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này." Tuyệt đối không tự bịa ra thông tin.
 
 Sinh viên: ${userMessage}
+Trợ lý:`
+        : `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
+Người dùng vừa nói: "${userMessage}"
+Hệ thống không tìm thấy tài liệu nào liên quan.
+- Nếu đây là lời chào hỏi hoặc câu xã giao, hãy đáp lại thân thiện, ngắn gọn và mời họ đặt câu hỏi về ký túc xá.
+- Nếu đây là câu hỏi cần thông tin, hãy trả lời đúng nguyên văn: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này."
+Tuyệt đối không tự bịa ra thông tin.
+
 Trợ lý:`;
 
-      // Gọi Ollama chạy model Gemma
-      const response = await fetch('http://localhost:11434/api/generate', {
+      // Gọi Ollama chạy model chat
+      const response = await fetch(`${this.ollamaUrl}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'gemma:2b', // Model trả lời
+          model: this.chatModel, // Model trả lời (mặc định qwen2.5:3b)
           prompt: fullPrompt,
-          stream: false // Nhận 1 cục kết quả luôn, không stream từng chữ
+          stream: false, // Nhận 1 cục kết quả luôn, không stream từng chữ
+          options: { temperature: 0.2 } // Hạ nhiệt độ để trả lời bám sát tài liệu, ít bịa
         })
       });
 
@@ -89,7 +113,7 @@ Trợ lý:`;
       }
 
       const data = await response.json();
-      return data.response;
+      return (data.response ?? '').trim();
 
     } catch (error) {
       console.error("Lỗi RAG Pipeline:", error);
