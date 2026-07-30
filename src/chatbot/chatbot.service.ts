@@ -7,18 +7,15 @@ import { Contract } from '../contracts/schemas/contract.schema';
 import { Invoice } from '../invoices/schemas/invoice.schema';
 import * as fs from 'fs';
 import * as path from 'path';
+import { Observable } from 'rxjs';
 
 @Injectable()
 export class ChatbotService {
-  // Cấu hình qua biến môi trường (có mặc định để chạy local ngay không cần .env).
-  // Đổi model chỉ cần set CHAT_MODEL trong .env, không phải sửa code.
   private readonly ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
   private readonly chatModel = process.env.CHAT_MODEL || 'qwen2.5:3b';
   private readonly embedModel = process.env.EMBED_MODEL || 'nomic-embed-text';
-  // Ngưỡng điểm tương đồng (0..1). Kết quả dưới ngưỡng bị coi là không liên quan.
   private readonly scoreThreshold = Number(process.env.CHATBOT_SCORE_THRESHOLD ?? 0.6);
 
-  // Từ khóa nhận biết câu hỏi liên quan tới bản thân sinh viên → cần nạp dữ liệu cá nhân.
   private readonly personalKeywords = [
     'của tôi', 'của mình', 'của em', 'tôi đang', 'mình đang', 'em đang',
     'phòng tôi', 'phòng mình', 'phòng em', 'phòng của',
@@ -36,18 +33,21 @@ export class ChatbotService {
     @InjectModel(Invoice.name) private invoiceModel: Model<Invoice>,
   ) {}
 
-  // 1. Gọi Ollama để biến câu chữ thành Vector số
   async getEmbedding(text: string): Promise<number[]> {
     try {
       const response = await fetch(`${this.ollamaUrl}/api/embeddings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: this.embedModel, // Model nhúng của Ollama
+          model: this.embedModel,
           prompt: text,
         }),
       });
-      if (!response.ok) throw new Error('Ollama Embedding failed');
+
+      if (!response.ok) {
+        throw new Error(`Ollama Embedding failed: ${response.status}`);
+      }
+
       const data = await response.json();
       return data.embedding;
     } catch (error) {
@@ -56,21 +56,17 @@ export class ChatbotService {
     }
   }
 
-  // 2. Tìm kiếm nội dung liên quan trong MongoDB.
-  // Trả về chuỗi tài liệu ghép lại, hoặc "" nếu không có đoạn nào đủ liên quan.
   async searchKnowledge(queryText: string): Promise<string> {
     const queryVector = await this.getEmbedding(queryText);
 
-    // Dùng $vectorSearch của MongoDB Atlas.
-    // numCandidates lớn hơn nhiều lần limit giúp tăng độ chính xác (recall) của tìm kiếm.
     const results = await this.knowledgeModel.aggregate([
       {
         $vectorSearch: {
-          index: 'vector_index', // Tên Index đã tạo trên MongoDB Atlas
-          path: 'embedding', // Cột chứa vector
-          queryVector: queryVector,
-          numCandidates: 100, // Quét rộng hơn (trước là 10) để không bỏ sót đoạn khớp
-          limit: 5, // Lấy 5 đoạn khớp nhất (trước là 3) để đủ ngữ cảnh trả lời
+          index: 'vector_index',
+          path: 'embedding',
+          queryVector,
+          numCandidates: 100,
+          limit: 5,
         },
       },
       {
@@ -78,21 +74,17 @@ export class ChatbotService {
       },
     ]);
 
-    // Lọc bỏ các đoạn điểm thấp: câu chào hỏi / ngoài phạm vi vẫn luôn trả về kết quả
-    // vô nghĩa, khiến model bị "lú" và trả lời lạc đề. Chỉ giữ đoạn thực sự liên quan.
     const relevant = results.filter((r) => r.score >= this.scoreThreshold);
 
     if (relevant.length === 0) return '';
     return relevant.map((r) => r.content).join('\n\n---\n\n');
   }
 
-  // 2b. Nhận biết câu hỏi có liên quan tới bản thân sinh viên hay không.
   private isPersonalQuery(message: string): boolean {
     const lower = message.toLowerCase();
     return this.personalKeywords.some((kw) => lower.includes(kw));
   }
 
-  // ─── Helper định dạng ─────────────────────────────────────────────────────
   private formatCurrency(amount: number): string {
     return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(amount);
   }
@@ -115,8 +107,6 @@ export class ChatbotService {
     }
   }
 
-  // 2c. Lấy thông tin cá nhân thật của sinh viên để nhồi vào ngữ cảnh trả lời.
-  // Trả về "" nếu không xác định được user (chatbot vẫn hoạt động bình thường).
   async getPersonalContext(userId?: string): Promise<string> {
     try {
       if (!userId || !isValidObjectId(userId)) return '';
@@ -145,11 +135,11 @@ export class ChatbotService {
         lines.push('- Phòng đang ở: chưa được xếp phòng');
       }
 
-      // Hợp đồng mới nhất của sinh viên
       const contract: any = await this.contractModel
         .findOne({ user: new Types.ObjectId(userId) })
         .sort({ createdAt: -1 })
         .lean();
+
       if (contract) {
         lines.push(
           `- Hợp đồng: ${contract.contractNumber}, hiệu lực ${this.formatDate(contract.startDate)} → ${this.formatDate(contract.endDate)}, ` +
@@ -159,7 +149,6 @@ export class ChatbotService {
         lines.push('- Hợp đồng: chưa có hợp đồng nào');
       }
 
-      // Hóa đơn gần đây của phòng sinh viên (hóa đơn gắn theo phòng, không theo user)
       if (user.room?._id) {
         const invoices: any[] = await this.invoiceModel
           .find({ room: user.room._id })
@@ -182,16 +171,13 @@ export class ChatbotService {
 
       return lines.join('\n');
     } catch (error) {
-      // Cá nhân hóa lỗi thì bỏ qua, không được làm hỏng câu trả lời chung
       console.error('Lỗi lấy thông tin cá nhân cho chatbot:', error);
       return '';
     }
   }
 
-  // 3. RAG Pipeline: kết hợp tài liệu quy định + thông tin cá nhân để trả lời.
   async getChatResponse(userMessage: string, userId?: string): Promise<string> {
     try {
-      // Chạy song song: tìm tài liệu + (nếu là câu hỏi cá nhân) lấy dữ liệu sinh viên
       const wantsPersonal = this.isPersonalQuery(userMessage);
       const [knowledgeContext, personalContext] = await Promise.all([
         this.searchKnowledge(userMessage),
@@ -201,13 +187,14 @@ export class ChatbotService {
       let fullPrompt: string;
 
       if (knowledgeContext || personalContext) {
-        // Có ít nhất một nguồn thông tin → ghép các khối ngữ cảnh vào prompt
         const blocks: string[] = [];
+
         if (personalContext) {
           blocks.push(
             `Thông tin cá nhân của sinh viên đang hỏi (chỉ dùng khi câu hỏi liên quan đến bản thân họ):\n<thong_tin_ca_nhan>\n${personalContext}\n</thong_tin_ca_nhan>`,
           );
         }
+
         if (knowledgeContext) {
           blocks.push(
             `Tài liệu quy định của ký túc xá:\n<tai_lieu>\n${knowledgeContext}\n</tai_lieu>`,
@@ -223,7 +210,6 @@ Nếu thông tin không đủ để trả lời, hãy nói: "Xin lỗi, hiện t
 Sinh viên: ${userMessage}
 Trợ lý:`;
       } else {
-        // Không có nguồn nào → chào hỏi hoặc báo không có thông tin
         fullPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
 Người dùng vừa nói: "${userMessage}"
 Hệ thống không tìm thấy tài liệu nào liên quan.
@@ -234,15 +220,14 @@ Tuyệt đối không tự bịa ra thông tin.
 Trợ lý:`;
       }
 
-      // Gọi Ollama chạy model chat
       const response = await fetch(`${this.ollamaUrl}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: this.chatModel, // Model trả lời (mặc định qwen2.5:3b)
+          model: this.chatModel,
           prompt: fullPrompt,
-          stream: false, // Nhận 1 cục kết quả luôn, không stream từng chữ
-          options: { temperature: 0.2 }, // Hạ nhiệt độ để trả lời bám sát dữ liệu, ít bịa
+          stream: false,
+          options: { temperature: 0.2 },
         }),
       });
 
@@ -258,7 +243,6 @@ Trợ lý:`;
     }
   }
 
-  // 4.1. Hàm phụ trợ: Đọc đệ quy lấy tất cả đường dẫn file .md (kể cả trong folder con)
   private getAllMdFiles(dirPath: string, arrayOfFiles: string[] = []): string[] {
     if (!fs.existsSync(dirPath)) return arrayOfFiles;
 
@@ -276,11 +260,8 @@ Trợ lý:`;
     return arrayOfFiles;
   }
 
-  // 4.2. Hàm Nạp Dữ Liệu
   async ingestData(): Promise<string> {
     const docsDir = path.join(process.cwd(), 'src', 'chatbot', 'docs');
-
-    // Tìm tất cả các file .md
     const filePaths = this.getAllMdFiles(docsDir);
 
     if (filePaths.length === 0) {
@@ -289,7 +270,6 @@ Trợ lý:`;
 
     let totalChunks = 0;
 
-    // Xóa dữ liệu cũ trong DB để nạp lại sạch đĩa
     await this.knowledgeModel.deleteMany({});
     console.log(`Đã tìm thấy ${filePaths.length} file .md. Đang bắt đầu tạo Vector...`);
 
@@ -297,24 +277,20 @@ Trợ lý:`;
       const fileName = path.basename(filePath);
       const content = fs.readFileSync(filePath, 'utf-8');
 
-      // Lấy tiêu đề tài liệu từ heading Markdown đầu tiên (# ...), fallback về tên file.
-      // Tiêu đề giúp câu hỏi ngắn khớp đúng chủ đề hơn khi tìm kiếm vector.
-      const headingMatch = content.match(/^#\s+(.+)$/m);
+      const headingMatch = content.match(/^#\\s+(.+)$/m);
       const docTitle = headingMatch ? headingMatch[1].trim() : fileName.replace('.md', '');
 
-      // Băm nhỏ văn bản theo các đoạn (xuống dòng 2 lần)
-      const chunks = content.split(/\n\s*\n/).filter((chunk) => chunk.trim().length > 30);
+      const chunks = content.split(/\\n\\s*\\n/).filter((chunk) => chunk.trim().length > 30);
 
       for (const chunk of chunks) {
         try {
           const cleanChunk = chunk.trim();
-          // Nhúng kèm tiêu đề để tăng ngữ cảnh chủ đề cho vector, nhưng chỉ lưu nội dung gốc.
-          const embedding = await this.getEmbedding(`${docTitle}\n\n${cleanChunk}`);
+          const embedding = await this.getEmbedding(`${docTitle}\\n\\n${cleanChunk}`);
 
           await this.knowledgeModel.create({
             title: docTitle,
             content: cleanChunk,
-            embedding: embedding,
+            embedding,
           });
           totalChunks++;
         } catch (err) {
@@ -324,5 +300,121 @@ Trợ lý:`;
     }
 
     return `Quá trình hoàn tất! Đã băm nhỏ và nạp thành công ${totalChunks} đoạn dữ liệu từ ${filePaths.length} file vào MongoDB.`;
+  }
+
+  async streamChatResponse(userMessage: string, userId?: string): Promise<Observable<{ data: string }>> {
+    const wantsPersonal = this.isPersonalQuery(userMessage);
+    const [knowledgeContext, personalContext] = await Promise.all([
+      this.searchKnowledge(userMessage),
+      wantsPersonal ? this.getPersonalContext(userId) : Promise.resolve(''),
+    ]);
+
+    let fullPrompt: string;
+
+    if (knowledgeContext || personalContext) {
+      const blocks: string[] = [];
+
+      if (personalContext) {
+        blocks.push(`Thông tin cá nhân của sinh viên đang hỏi:\n<thong_tin_ca_nhan>\n${personalContext}\n</thong_tin_ca_nhan>`);
+      }
+
+      if (knowledgeContext) {
+        blocks.push(`Tài liệu quy định của ký túc xá:\n<tai_lieu>\n${knowledgeContext}\n</tai_lieu>`);
+      }
+
+      fullPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
+${blocks.join('\n\n')}
+
+Hãy trả lời sinh viên ngắn gọn, thân thiện và chính xác, CHỈ dựa vào thông tin ở trên.
+Nếu thông tin không đủ để trả lời, hãy nói: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này." Tuyệt đối không tự bịa ra thông tin.
+
+Sinh viên: ${userMessage}
+Trợ lý:`;
+    } else {
+      fullPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
+Người dùng vừa nói: "${userMessage}"
+Hệ thống không tìm thấy tài liệu nào liên quan.
+- Nếu đây là lời chào hỏi, hãy đáp lại thân thiện.
+- Nếu đây là câu hỏi, hãy trả lời đúng nguyên văn: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này."
+Tuyệt đối không tự bịa ra thông tin.
+
+Trợ lý:`;
+    }
+
+    const payload = {
+      model: this.chatModel,
+      prompt: fullPrompt,
+      stream: true,
+      keep_alive: '10m',
+      num_predict: 512,
+      options: { temperature: 0.2 },
+    };
+
+    const response = await fetch(`${this.ollamaUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error('Ollama stream body not available');
+    }
+
+    const decoder = new TextDecoder();
+
+    return new Observable((subscriber) => {
+      let buffer = '';
+
+      const readStream = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+
+            if (done) {
+              if (buffer.trim()) {
+                try {
+                  const json = JSON.parse(buffer.trim());
+                  const reply = json.response ?? '';
+                  if (reply) {
+                    subscriber.next({ data: reply });
+                  }
+                } catch {}
+              }
+
+              subscriber.complete();
+              break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+              const trimmedLine = line.trim();
+              if (!trimmedLine) continue;
+
+              try {
+                const json = JSON.parse(trimmedLine);
+                const reply = json.response ?? '';
+                if (reply) {
+                  subscriber.next({ data: reply });
+                }
+              } catch {
+                // Bỏ qua chunk không parse được
+              }
+            }
+          }
+        } catch (error) {
+          subscriber.error(error);
+        }
+      };
+
+      void readStream();
+    });
   }
 }
