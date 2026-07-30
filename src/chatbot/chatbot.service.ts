@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { Knowledge } from './knowledge.schema';
@@ -11,10 +11,20 @@ import { Observable } from 'rxjs';
 
 @Injectable()
 export class ChatbotService {
+  private readonly logger = new Logger(ChatbotService.name);
+
   private readonly ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
   private readonly chatModel = process.env.CHAT_MODEL || 'qwen2.5:3b';
   private readonly embedModel = process.env.EMBED_MODEL || 'nomic-embed-text';
-  private readonly scoreThreshold = Number(process.env.CHATBOT_SCORE_THRESHOLD ?? 0.6);
+  // Ngưỡng điểm tương đồng. Đo thực nghiệm với nomic-embed-text: câu lạc đề
+  // ("xin chào", "nấu phở bò") đạt 0.80–0.84, câu đúng đề đạt 0.88+. Ngưỡng 0.6
+  // cũ khiến mọi câu đều lọt, nên lời chào cũng bị nhồi 8 đoạn nội quy.
+  // Đặt 0.82 để loại lời chào/cảm ơn (context rỗng → trả lời nhanh hơn nhiều),
+  // vẫn còn biên an toàn cho câu hỏi thật. Hạ xuống nếu bot hay báo "chưa có thông tin".
+  private readonly scoreThreshold = Number(process.env.CHATBOT_SCORE_THRESHOLD ?? 0.82);
+  // Số đoạn tài liệu tối đa đưa vào ngữ cảnh. Câu hỏi tổng quát ("nội quy gồm những
+  // gì") cần nhiều mục mới trả lời đủ — riêng file nội quy đã có 6 mục.
+  private readonly searchLimit = Number(process.env.CHATBOT_SEARCH_LIMIT ?? 8);
 
   private readonly personalKeywords = [
     'của tôi', 'của mình', 'của em', 'tôi đang', 'mình đang', 'em đang',
@@ -66,7 +76,7 @@ export class ChatbotService {
           path: 'embedding',
           queryVector,
           numCandidates: 100,
-          limit: 5,
+          limit: this.searchLimit,
         },
       },
       {
@@ -75,6 +85,21 @@ export class ChatbotService {
     ]);
 
     const relevant = results.filter((r) => r.score >= this.scoreThreshold);
+
+    // Log điểm số để chẩn đoán: biết đoạn nào được chọn, đoạn nào bị ngưỡng loại.
+    // Nhờ đó tinh chỉnh CHATBOT_SCORE_THRESHOLD dựa trên số liệu thật thay vì đoán.
+    if (results.length === 0) {
+      this.logger.warn(`Truy vấn "${queryText}" — vector search không trả về kết quả nào`);
+    } else {
+      const lines = results.map((r) => {
+        const kept = r.score >= this.scoreThreshold ? 'GIỮ ' : 'loại';
+        const preview = String(r.content).replace(/\s+/g, ' ').slice(0, 70);
+        return `    ${kept} ${r.score.toFixed(4)}  ${preview}…`;
+      });
+      this.logger.log(
+        `Truy vấn "${queryText}" — ${relevant.length}/${results.length} đoạn vượt ngưỡng ${this.scoreThreshold}:\n${lines.join('\n')}`,
+      );
+    }
 
     if (relevant.length === 0) return '';
     return relevant.map((r) => r.content).join('\n\n---\n\n');
@@ -176,6 +201,101 @@ export class ChatbotService {
     }
   }
 
+  // Thông điệp `system`: chỉ giữ vai trò + ràng buộc cốt lõi.
+  // Model instruct được huấn luyện theo định dạng system/user, nên đặt đúng khe
+  // giúp tuân thủ tốt hơn hẳn so với nhồi tất cả vào một khối văn bản.
+  private readonly systemPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá, chỉ giao tiếp bằng tiếng Việt.
+Nguyên tắc: chỉ dùng thông tin trong tài liệu người dùng cung cấp, không bịa thêm. Toàn bộ câu trả lời phải viết bằng tiếng Việt, không được chèn từ của ngôn ngữ khác.`;
+
+  // Thông điệp `user`: dữ liệu + câu hỏi + hướng dẫn trình bày.
+  // Hướng dẫn định dạng đặt ngay cạnh câu hỏi (thay vì trong system) cho kết quả
+  // đầy đủ hơn rõ rệt khi đo thực nghiệm.
+  private buildUserMessage(
+    userMessage: string,
+    knowledgeContext: string,
+    personalContext: string,
+  ): string {
+    // Không có nguồn nào → chào hỏi hoặc báo chưa có thông tin
+    if (!knowledgeContext && !personalContext) {
+      return `Người dùng vừa nói: "${userMessage}"
+Hệ thống không tìm thấy tài liệu nào liên quan.
+- Nếu đây là lời chào hỏi hoặc câu xã giao, hãy đáp lại thân thiện, ngắn gọn bằng tiếng Việt và mời họ đặt câu hỏi về ký túc xá.
+- Nếu đây là câu hỏi cần thông tin, hãy trả lời đúng nguyên văn: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này."`;
+    }
+
+    const blocks: string[] = [];
+
+    if (personalContext) {
+      blocks.push(
+        `Thông tin cá nhân của sinh viên đang hỏi (chỉ dùng khi câu hỏi liên quan đến bản thân họ):\n<thong_tin_ca_nhan>\n${personalContext}\n</thong_tin_ca_nhan>`,
+      );
+    }
+
+    if (knowledgeContext) {
+      blocks.push(
+        `Tài liệu quy định của ký túc xá (mỗi đoạn mở đầu bằng nhãn [Tên tài liệu — Mục]):\n<tai_lieu>\n${knowledgeContext}\n</tai_lieu>`,
+      );
+    }
+
+    return `${blocks.join('\n\n')}
+
+Câu hỏi của sinh viên: ${userMessage}
+
+Cách trả lời:
+- Chỉ dùng những đoạn tài liệu LIÊN QUAN tới câu hỏi. Bỏ qua hoàn toàn các đoạn không liên quan.
+- Nhãn trong ngoặc vuông chỉ để bạn nhận biết nguồn. TUYỆT ĐỐI không viết nhãn đó vào câu trả lời.
+- Nếu câu hỏi hỏi MỘT chi tiết cụ thể: trả lời thẳng chi tiết đó trong 1–2 câu, không liệt kê thêm quy định khác.
+- Nếu câu hỏi hỏi về MỘT LOẠI quy định (gửi xe, điện nước, nội quy...): nêu đủ các mục thuộc loại đó có trong tài liệu, mỗi mục một gạch đầu dòng kèm nội dung cụ thể.
+- Viết bằng tiếng Việt. Không thêm lời xin lỗi ở cuối.`;
+  }
+
+  // Cắt phần khung prompt bị model chép lại vào ĐẦU câu trả lời, ví dụ
+  // "Câu hỏi của sinh viên: Nội quy điện nước như thế nào Định mức và đơn giá...".
+  private stripEchoedQuestion(text: string, question: string): string {
+    let out = text.replace(/^\s*Câu hỏi của sinh viên\s*:?\s*/i, '');
+
+    // Model có thể chép lại chính câu hỏi ngay sau đó
+    const q = question.trim();
+    if (q && out.toLowerCase().startsWith(q.toLowerCase())) {
+      out = out.slice(q.length);
+    }
+
+    // Dọn dấu câu thừa còn sót lại ở đầu
+    return out.replace(/^[\s:.\-–—]+/, '');
+  }
+
+  // Cắt câu xin lỗi/rào đón thừa mà model 3B hay tự thêm vào CUỐI câu trả lời,
+  // bất chấp prompt đã cấm. Chỉ cắt khi phía trước còn nội dung thật — nếu toàn bộ
+  // câu trả lời chỉ là lời xin lỗi (trường hợp "không có thông tin") thì giữ nguyên.
+  private stripTrailingApology(text: string): string {
+    const trimmed = text.trim();
+    // Khớp 1-2 câu cuối bắt đầu bằng "Xin lỗi"/"Rất tiếc" (cả khi thiếu dấu chấm cuối)
+    const pattern = /(?:\n|\s)*(?:Xin lỗi|Rất tiếc)[^.!?\n]*[.!?]?\s*$/;
+    let result = trimmed;
+    // Lặp tối đa 2 lần phòng khi model viết 2 câu rào đón liên tiếp
+    for (let i = 0; i < 2; i++) {
+      const next = result.replace(pattern, '').trim();
+      if (next === result || next.length === 0) break;
+      result = next;
+    }
+    return result.length > 0 ? result : trimmed;
+  }
+
+  // Tham số sinh văn bản dùng chung cho cả /ask và /stream, để hai đường không lệch nhau.
+  // temperature thấp: bám sát tài liệu, ít bịa. num_predict: chặn độ dài (phải nằm
+  // trong options mới có hiệu lực). keep_alive là tham số top-level của Ollama nên
+  // được đặt riêng ở payload, không nằm ở đây.
+  private readonly generateOptions = {
+    // temperature 0 = giải mã tham lam. Đo thực nghiệm: ở 0.2 model chèn 13 từ
+    // tiếng Indonesia vào một câu trả lời (có đoạn chuyển hẳn sang tiếng Indonesia);
+    // ở 0 thì còn 0 từ trên cả 5 câu kiểm thử, đồng thời nhanh hơn nhiều.
+    temperature: 0,
+    // Bảo hiểm chống lặp — điểm yếu cố hữu của giải mã tham lam.
+    repeat_penalty: 1.15,
+    // Trần độ dài (không phải mục tiêu): câu ngắn vẫn dừng sớm nên không chậm thêm.
+    num_predict: 1536,
+  };
+
   async getChatResponse(userMessage: string, userId?: string): Promise<string> {
     try {
       const wantsPersonal = this.isPersonalQuery(userMessage);
@@ -184,50 +304,24 @@ export class ChatbotService {
         wantsPersonal ? this.getPersonalContext(userId) : Promise.resolve(''),
       ]);
 
-      let fullPrompt: string;
-
-      if (knowledgeContext || personalContext) {
-        const blocks: string[] = [];
-
-        if (personalContext) {
-          blocks.push(
-            `Thông tin cá nhân của sinh viên đang hỏi (chỉ dùng khi câu hỏi liên quan đến bản thân họ):\n<thong_tin_ca_nhan>\n${personalContext}\n</thong_tin_ca_nhan>`,
-          );
-        }
-
-        if (knowledgeContext) {
-          blocks.push(
-            `Tài liệu quy định của ký túc xá:\n<tai_lieu>\n${knowledgeContext}\n</tai_lieu>`,
-          );
-        }
-
-        fullPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
-${blocks.join('\n\n')}
-
-Hãy trả lời sinh viên ngắn gọn, thân thiện và chính xác, CHỈ dựa vào thông tin ở trên.
-Nếu thông tin không đủ để trả lời, hãy nói: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này." Tuyệt đối không tự bịa ra thông tin.
-
-Sinh viên: ${userMessage}
-Trợ lý:`;
-      } else {
-        fullPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
-Người dùng vừa nói: "${userMessage}"
-Hệ thống không tìm thấy tài liệu nào liên quan.
-- Nếu đây là lời chào hỏi hoặc câu xã giao, hãy đáp lại thân thiện, ngắn gọn và mời họ đặt câu hỏi về ký túc xá.
-- Nếu đây là câu hỏi cần thông tin, hãy trả lời đúng nguyên văn: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này."
-Tuyệt đối không tự bịa ra thông tin.
-
-Trợ lý:`;
-      }
-
-      const response = await fetch(`${this.ollamaUrl}/api/generate`, {
+      // Dùng /api/chat (không phải /api/generate): đặt quy tắc vào khe `system`
+      // và dữ liệu + câu hỏi vào khe `user`, đúng định dạng model instruct được
+      // huấn luyện. Đo thực nghiệm cho thấy cách này loại sạch việc chèn từ nước ngoài.
+      const response = await fetch(`${this.ollamaUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: this.chatModel,
-          prompt: fullPrompt,
           stream: false,
-          options: { temperature: 0.2 },
+          keep_alive: '10m',
+          messages: [
+            { role: 'system', content: this.systemPrompt },
+            {
+              role: 'user',
+              content: this.buildUserMessage(userMessage, knowledgeContext, personalContext),
+            },
+          ],
+          options: this.generateOptions,
         }),
       });
 
@@ -236,7 +330,8 @@ Trợ lý:`;
       }
 
       const data = await response.json();
-      return (data.response ?? '').trim();
+      const raw = (data?.message?.content ?? '').trim();
+      return this.stripTrailingApology(this.stripEchoedQuestion(raw, userMessage));
     } catch (error) {
       console.error('Lỗi RAG Pipeline:', error);
       throw new HttpException('Chatbot local đang bận hoặc chưa bật Ollama.', HttpStatus.INTERNAL_SERVER_ERROR);
@@ -260,6 +355,89 @@ Trợ lý:`;
     return arrayOfFiles;
   }
 
+  // Băm một file Markdown thành các chunk có mang ngữ cảnh phân cấp.
+  //
+  // So với cách cũ (chỉ tách theo dòng trống): mỗi chunk giờ biết mình thuộc tài
+  // liệu nào, mục nào. Nhãn "[Tên tài liệu — Mục]" được ghi vào content nên model
+  // nhìn thấy nguồn của từng đoạn và chọn đúng đoạn khớp chủ đề, đồng thời nhãn
+  // cũng vào embedding giúp câu hỏi ngắn khớp đúng hơn. Mục quá dài bị tách tiếp
+  // theo từng gạch đầu dòng để truy xuất chính xác thay vì trả về cả khối lớn.
+  private buildChunksFromMarkdown(
+    content: string,
+    fileName: string,
+  ): { docTitle: string; chunks: { content: string; embedText: string }[] } {
+    const MAX_BODY = 700; // Ngưỡng ký tự: dài hơn thì tách theo dòng
+    const MIN_BODY = 30; // Bỏ đoạn quá ngắn (giống hành vi cũ)
+
+    // Chuẩn hóa " & " thành " và ": model đọc ký hiệu & thành "dan" (tiếng Indonesia),
+    // gây ra lỗi kiểu "phòng cháy chữa cháy dan toàn". Chỉ thay khi & đứng giữa hai
+    // dấu cách để không phá hỏng URL dạng "?page=1&limit=25" trong tài liệu kỹ thuật.
+    content = content.replace(/ & /g, ' và ');
+
+    const headingMatch = content.match(/^#\s+(.+)$/m);
+    const docTitle = headingMatch ? headingMatch[1].trim() : fileName.replace('.md', '');
+
+    const chunks: { content: string; embedText: string }[] = [];
+    let section = ''; // Mục hiện tại (từ heading ## / ###)
+
+    const label = () => (section ? `${docTitle} — ${section}` : docTitle);
+
+    const push = (body: string) => {
+      const text = body.trim();
+      if (text.length < MIN_BODY) return;
+      chunks.push({
+        content: `[${label()}]\n${text}`,
+        embedText: `${docTitle}\n${section}\n\n${text}`,
+      });
+    };
+
+    // Tách theo dòng trống, nhưng bám theo heading để biết đang ở mục nào
+    for (const rawBlock of content.split(/\n\s*\n/)) {
+      const block = rawBlock.trim();
+      if (!block) continue;
+
+      const lines = block.split('\n');
+      const bodyLines: string[] = [];
+
+      for (const line of lines) {
+        const h = line.match(/^(#{1,6})\s+(.+)$/);
+        if (h) {
+          // Gặp heading: cập nhật mục hiện tại, bản thân dòng heading không thành chunk
+          // (nhờ vậy loại được các chunk rác chỉ chứa tiêu đề).
+          const depth = h[1].length;
+          const title = h[2].trim();
+          section = depth === 1 ? '' : title;
+          continue;
+        }
+        bodyLines.push(line);
+      }
+
+      const body = bodyLines.join('\n').trim();
+      if (!body) continue;
+
+      if (body.length <= MAX_BODY) {
+        push(body);
+        continue;
+      }
+
+      // Mục dài: gom từng dòng lại thành nhóm không vượt MAX_BODY
+      let group: string[] = [];
+      let len = 0;
+      for (const line of body.split('\n')) {
+        if (len > 0 && len + line.length > MAX_BODY) {
+          push(group.join('\n'));
+          group = [];
+          len = 0;
+        }
+        group.push(line);
+        len += line.length + 1;
+      }
+      if (group.length > 0) push(group.join('\n'));
+    }
+
+    return { docTitle, chunks };
+  }
+
   async ingestData(): Promise<string> {
     const docsDir = path.join(process.cwd(), 'src', 'chatbot', 'docs');
     const filePaths = this.getAllMdFiles(docsDir);
@@ -277,19 +455,17 @@ Trợ lý:`;
       const fileName = path.basename(filePath);
       const content = fs.readFileSync(filePath, 'utf-8');
 
-      const headingMatch = content.match(/^#\\s+(.+)$/m);
-      const docTitle = headingMatch ? headingMatch[1].trim() : fileName.replace('.md', '');
-
-      const chunks = content.split(/\\n\\s*\\n/).filter((chunk) => chunk.trim().length > 30);
+      // Băm theo mục, mỗi chunk mang nhãn "[Tên tài liệu — Mục]"
+      const { docTitle, chunks } = this.buildChunksFromMarkdown(content, fileName);
 
       for (const chunk of chunks) {
         try {
-          const cleanChunk = chunk.trim();
-          const embedding = await this.getEmbedding(`${docTitle}\\n\\n${cleanChunk}`);
+          // Nhúng theo embedText (có tiêu đề + tên mục) để tăng ngữ cảnh chủ đề
+          const embedding = await this.getEmbedding(chunk.embedText);
 
           await this.knowledgeModel.create({
             title: docTitle,
-            content: cleanChunk,
+            content: chunk.content,
             embedding,
           });
           totalChunks++;
@@ -309,48 +485,24 @@ Trợ lý:`;
       wantsPersonal ? this.getPersonalContext(userId) : Promise.resolve(''),
     ]);
 
-    let fullPrompt: string;
-
-    if (knowledgeContext || personalContext) {
-      const blocks: string[] = [];
-
-      if (personalContext) {
-        blocks.push(`Thông tin cá nhân của sinh viên đang hỏi:\n<thong_tin_ca_nhan>\n${personalContext}\n</thong_tin_ca_nhan>`);
-      }
-
-      if (knowledgeContext) {
-        blocks.push(`Tài liệu quy định của ký túc xá:\n<tai_lieu>\n${knowledgeContext}\n</tai_lieu>`);
-      }
-
-      fullPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
-${blocks.join('\n\n')}
-
-Hãy trả lời sinh viên ngắn gọn, thân thiện và chính xác, CHỈ dựa vào thông tin ở trên.
-Nếu thông tin không đủ để trả lời, hãy nói: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này." Tuyệt đối không tự bịa ra thông tin.
-
-Sinh viên: ${userMessage}
-Trợ lý:`;
-    } else {
-      fullPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá.
-Người dùng vừa nói: "${userMessage}"
-Hệ thống không tìm thấy tài liệu nào liên quan.
-- Nếu đây là lời chào hỏi, hãy đáp lại thân thiện.
-- Nếu đây là câu hỏi, hãy trả lời đúng nguyên văn: "Xin lỗi, hiện tại tôi chưa có thông tin về vấn đề này."
-Tuyệt đối không tự bịa ra thông tin.
-
-Trợ lý:`;
-    }
-
+    // Dùng chung systemPrompt/buildUserMessage với /ask để hai đường không lệch nhau
     const payload = {
       model: this.chatModel,
-      prompt: fullPrompt,
       stream: true,
+      // keep_alive là tham số top-level của Ollama: giữ model nóng trong RAM,
+      // tránh mất vài chục giây nạp lại model ở câu hỏi sau.
       keep_alive: '10m',
-      num_predict: 512,
-      options: { temperature: 0.2 },
+      messages: [
+        { role: 'system', content: this.systemPrompt },
+        {
+          role: 'user',
+          content: this.buildUserMessage(userMessage, knowledgeContext, personalContext),
+        },
+      ],
+      options: this.generateOptions,
     };
 
-    const response = await fetch(`${this.ollamaUrl}/api/generate`, {
+    const response = await fetch(`${this.ollamaUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -370,6 +522,53 @@ Trợ lý:`;
     return new Observable((subscriber) => {
       let buffer = '';
 
+      // Giữ lại phần ĐUÔI của văn bản chưa xả ra client, để khi stream kết thúc
+      // có thể cắt câu xin lỗi thừa (stripTrailingApology) TRƯỚC khi nó kịp hiện
+      // lên màn hình. Đánh đổi: ~200 ký tự cuối hiện trễ hơn một chút.
+      const HOLDBACK = 200;
+      // Tương tự cho phần ĐẦU: đệm đủ dài để nhận diện và cắt đoạn model chép lại
+      // câu hỏi, rồi mới bắt đầu xả. Chỉ đệm vừa đủ nên độ trễ đầu ra không đáng kể.
+      const HEAD_MIN = Math.min(200, userMessage.length + 40);
+      let headCleaned = false;
+      let fullText = ''; // toàn bộ văn bản model đã sinh
+      let emittedLen = 0; // số ký tự đã xả cho client
+
+      const emitUpTo = (target: number) => {
+        if (target > emittedLen) {
+          subscriber.next({ data: fullText.slice(emittedLen, target) });
+          emittedLen = target;
+        }
+      };
+
+      const appendReply = (reply: string) => {
+        fullText += reply;
+
+        // Chưa đủ dài để xét phần đầu thì chưa xả gì cả
+        if (!headCleaned) {
+          if (fullText.length < HEAD_MIN) return;
+          // Chưa xả ký tự nào nên thay thế fullText ở đây là an toàn
+          fullText = this.stripEchoedQuestion(fullText, userMessage);
+          headCleaned = true;
+        }
+
+        // Chỉ xả phần vượt quá vùng đuôi giữ lại
+        emitUpTo(Math.max(emittedLen, fullText.length - HOLDBACK));
+      };
+
+      const finish = () => {
+        // Câu trả lời ngắn hơn HEAD_MIN thì chưa qua bước lọc phần đầu — làm nốt ở đây
+        if (!headCleaned) {
+          fullText = this.stripEchoedQuestion(fullText, userMessage);
+          headCleaned = true;
+        }
+        // Lọc lời xin lỗi thừa trên TOÀN VĂN rồi xả nốt phần đuôi còn giữ
+        const cleaned = this.stripTrailingApology(fullText);
+        if (cleaned.length > emittedLen) {
+          subscriber.next({ data: cleaned.slice(emittedLen) });
+        }
+        subscriber.complete();
+      };
+
       const readStream = async () => {
         try {
           while (true) {
@@ -379,14 +578,13 @@ Trợ lý:`;
               if (buffer.trim()) {
                 try {
                   const json = JSON.parse(buffer.trim());
-                  const reply = json.response ?? '';
-                  if (reply) {
-                    subscriber.next({ data: reply });
-                  }
+                  // /api/chat trả về message.content (khác /api/generate dùng response)
+                  const reply = json?.message?.content ?? '';
+                  if (reply) appendReply(reply);
                 } catch {}
               }
 
-              subscriber.complete();
+              finish();
               break;
             }
 
@@ -400,10 +598,8 @@ Trợ lý:`;
 
               try {
                 const json = JSON.parse(trimmedLine);
-                const reply = json.response ?? '';
-                if (reply) {
-                  subscriber.next({ data: reply });
-                }
+                const reply = json?.message?.content ?? '';
+                if (reply) appendReply(reply);
               } catch {
                 // Bỏ qua chunk không parse được
               }
