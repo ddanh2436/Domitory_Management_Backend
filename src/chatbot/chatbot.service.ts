@@ -9,6 +9,30 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Observable } from 'rxjs';
 
+// Thẻ hoá đơn có cấu trúc: gửi thẳng số liệu cho giao diện vẽ bảng, thay vì
+// bắt model 3B tự kẻ bảng Markdown (hay sai số, hay bịa dòng).
+export interface InvoiceCard {
+  id: string;
+  month: number;
+  year: number;
+  roomName: string;
+  roomFee: number;
+  electricityFee: number;
+  waterFee: number;
+  totalAmount: number;
+  dueDate?: string;
+  status: string;
+}
+
+// Các sự kiện đẩy về client qua SSE. Giao diện dựa vào `type` để biết vẽ gì:
+// dòng trạng thái, chữ, chip nguồn, bảng hoá đơn, hay khối "không có trong tài liệu".
+export type ChatStreamEvent =
+  | { type: 'status'; status: string }
+  | { type: 'text'; text: string }
+  | { type: 'sources'; sources: string[] }
+  | { type: 'invoice'; invoice: InvoiceCard }
+  | { type: 'notfound'; suggestions: string[] };
+
 @Injectable()
 export class ChatbotService {
   private readonly logger = new Logger(ChatbotService.name);
@@ -66,7 +90,40 @@ export class ChatbotService {
     }
   }
 
+  // Rút nhãn "[Tên tài liệu — Mục]" ở đầu mỗi đoạn để hiện chip "NGUỒN" dưới câu
+  // trả lời. Gom các mục cùng một tài liệu lại ("Nội quy KTX — 1, 3") cho gọn,
+  // giữ tối đa 3 chip vì khung chat chỉ rộng 400px.
+  private extractSources(contents: string[]): string[] {
+    const sections = new Map<string, string[]>();
+
+    for (const content of contents) {
+      const match = content.match(/^\[([^\]]+)\]/);
+      if (!match) continue;
+
+      const [docTitle, section] = match[1].split('—').map((part) => part.trim());
+      if (!docTitle) continue;
+
+      const list = sections.get(docTitle) ?? [];
+      if (section && !list.includes(section)) list.push(section);
+      sections.set(docTitle, list);
+    }
+
+    return [...sections.entries()].slice(0, 3).map(([docTitle, list]) => {
+      if (list.length === 0) return docTitle;
+      // "1. Quy định về Giờ giấc sinh hoạt" → "1" để chip đủ ngắn
+      const numbers = list.map((s) => s.match(/^(\d+)\./)?.[1]).filter(Boolean);
+      if (numbers.length === list.length) return `${docTitle} · §${numbers.join(', ')}`;
+      return `${docTitle} · ${list[0]}${list.length > 1 ? ` +${list.length - 1}` : ''}`;
+    });
+  }
+
   async searchKnowledge(queryText: string): Promise<string> {
+    return (await this.searchKnowledgeDetailed(queryText)).context;
+  }
+
+  async searchKnowledgeDetailed(
+    queryText: string,
+  ): Promise<{ context: string; sources: string[] }> {
     const queryVector = await this.getEmbedding(queryText);
 
     const results = await this.knowledgeModel.aggregate([
@@ -101,8 +158,13 @@ export class ChatbotService {
       );
     }
 
-    if (relevant.length === 0) return '';
-    return relevant.map((r) => r.content).join('\n\n---\n\n');
+    if (relevant.length === 0) return { context: '', sources: [] };
+
+    const contents = relevant.map((r) => String(r.content));
+    return {
+      context: contents.join('\n\n---\n\n'),
+      sources: this.extractSources(contents),
+    };
   }
 
   private isPersonalQuery(message: string): boolean {
@@ -188,6 +250,13 @@ export class ChatbotService {
               `  + Tháng ${inv.month}/${inv.year}: ${this.formatCurrency(inv.totalAmount)} — ${this.invoiceStatusLabel(inv.status)}` +
                 `${inv.dueDate ? ` (hạn ${this.formatDate(inv.dueDate)})` : ''}`,
             );
+            // Chi tiết từng khoản: có sẵn thì bot trả lời được "tiền điện tháng 7
+            // bao nhiêu" mà không phải hỏi lại, thay vì chỉ biết mỗi tổng tiền.
+            lines.push(
+              `    · Tiền phòng ${this.formatCurrency(inv.roomFee ?? 0)}` +
+                `, tiền điện ${this.formatCurrency(inv.electricityFee ?? 0)}` +
+                `, tiền nước ${this.formatCurrency(inv.waterFee ?? 0)}`,
+            );
           }
         } else {
           lines.push('- Hóa đơn gần đây: chưa có hóa đơn nào');
@@ -199,6 +268,101 @@ export class ChatbotService {
       console.error('Lỗi lấy thông tin cá nhân cho chatbot:', error);
       return '';
     }
+  }
+
+  private readonly invoiceKeywords = [
+    'hóa đơn', 'hoá đơn', 'tiền phòng', 'tiền điện', 'tiền nước',
+    'công nợ', 'còn nợ', 'chưa đóng', 'phải đóng', 'đóng bao nhiêu', 'thanh toán',
+  ];
+
+  // Câu hỏi phải vừa nói về hoá đơn, vừa nhắm vào hoá đơn CỦA NGƯỜI HỎI (sở hữu
+  // hoặc nêu rõ tháng). Nếu không, "Quy trình thanh toán hoá đơn thế nào?" sẽ bị
+  // đính kèm bảng hoá đơn cá nhân — vừa lạc đề, vừa làm model rút gọn câu trả lời.
+  private readonly invoiceOwnershipPattern =
+    /của (tôi|mình|em)|phòng (tôi|mình|em)|tôi (còn|phải|đã) (nợ|đóng)|tháng\s*\d|tháng này/i;
+
+  private isInvoiceQuery(message: string): boolean {
+    const lower = message.toLowerCase();
+    if (!this.invoiceKeywords.some((kw) => lower.includes(kw))) return false;
+    return this.invoiceOwnershipPattern.test(message);
+  }
+
+  // Tìm hoá đơn mà câu hỏi nhắc tới. "Hoá đơn tháng 7 của tôi bao nhiêu?" → hoá đơn
+  // tháng 7 của phòng sinh viên đang ở; không nêu tháng thì lấy kỳ gần nhất.
+  // Trả về số liệu thô để giao diện tự kẻ bảng — model không đụng vào con số nào.
+  async getInvoiceCard(message: string, userId?: string): Promise<InvoiceCard | null> {
+    try {
+      if (!userId || !isValidObjectId(userId)) return null;
+      if (!this.isInvoiceQuery(message)) return null;
+
+      const user: any = await this.userModel
+        .findById(userId)
+        .select('room')
+        .populate('room', 'name building')
+        .lean();
+
+      if (!user?.room?._id) return null;
+
+      const monthMatch = message.match(/tháng\s*(\d{1,2})/i);
+      const yearMatch = message.match(/năm\s*(\d{4})|\/\s*(\d{4})/i);
+
+      const filter: Record<string, unknown> = { room: user.room._id };
+      if (monthMatch) {
+        const month = Number(monthMatch[1]);
+        if (month >= 1 && month <= 12) filter.month = month;
+      }
+      if (yearMatch) filter.year = Number(yearMatch[1] ?? yearMatch[2]);
+
+      const invoice: any = await this.invoiceModel
+        .findOne(filter)
+        .sort({ year: -1, month: -1 })
+        .lean();
+
+      if (!invoice) return null;
+
+      return {
+        id: String(invoice._id),
+        month: invoice.month,
+        year: invoice.year,
+        roomName: user.room.building ? `${user.room.name} · ${user.room.building}` : user.room.name,
+        roomFee: invoice.roomFee ?? 0,
+        electricityFee: invoice.electricityFee ?? 0,
+        waterFee: invoice.waterFee ?? 0,
+        totalAmount: invoice.totalAmount ?? 0,
+        dueDate: invoice.dueDate ? this.formatDate(invoice.dueDate) : undefined,
+        status: invoice.status,
+      };
+    } catch (error) {
+      this.logger.error('Lỗi lấy hoá đơn cho chatbot:', error);
+      return null;
+    }
+  }
+
+  // Câu hỏi gợi ý khi bot không tra được: chỉ nêu những chủ đề CHẮC CHẮN có trong
+  // bộ tài liệu, để sinh viên bấm một cái là ra kết quả thật thay vì lại bí tiếp.
+  private readonly fallbackSuggestions: { keywords: string[]; questions: string[] }[] = [
+    {
+      keywords: ['cọc', 'trả phòng', 'checkout', 'hoàn tiền'],
+      questions: ['Thủ tục trả phòng gồm những gì?', 'Hạn đóng tiền phòng là khi nào?', 'Đăng ký về muộn thế nào?'],
+    },
+    {
+      keywords: ['xe', 'gửi xe', 'bãi xe'],
+      questions: ['Đăng ký vé xe cần gì?', 'Quy định tại bãi xe ra sao?', 'Nội quy KTX gồm những mục nào?'],
+    },
+    {
+      keywords: ['điện', 'nước', 'kwh', 'định mức'],
+      questions: ['Định mức và đơn giá điện nước là bao nhiêu?', 'Xử lý sự cố điện nước thế nào?', 'Hoá đơn tháng này của tôi?'],
+    },
+  ];
+
+  private getSuggestions(message: string): string[] {
+    const lower = message.toLowerCase();
+    const matched = this.fallbackSuggestions.find((group) =>
+      group.keywords.some((kw) => lower.includes(kw)),
+    );
+    return matched
+      ? matched.questions
+      : ['Nội quy KTX gồm những mục nào?', 'Giờ đóng cửa KTX là mấy giờ?', 'Thủ tục trả phòng gồm những gì?'];
   }
 
   // Thông điệp `system`: chỉ giữ vai trò + ràng buộc cốt lõi.
@@ -214,6 +378,7 @@ Nguyên tắc: chỉ dùng thông tin trong tài liệu người dùng cung cấ
     userMessage: string,
     knowledgeContext: string,
     personalContext: string,
+    hasInvoiceCard = false,
   ): string {
     // Không có nguồn nào → chào hỏi hoặc báo chưa có thông tin
     if (!knowledgeContext && !personalContext) {
@@ -246,7 +411,12 @@ Cách trả lời:
 - Nhãn trong ngoặc vuông chỉ để bạn nhận biết nguồn. TUYỆT ĐỐI không viết nhãn đó vào câu trả lời.
 - Nếu câu hỏi hỏi MỘT chi tiết cụ thể: trả lời thẳng chi tiết đó trong 1–2 câu, không liệt kê thêm quy định khác.
 - Nếu câu hỏi hỏi về MỘT LOẠI quy định (gửi xe, điện nước, nội quy...): nêu đủ các mục thuộc loại đó có trong tài liệu, mỗi mục một gạch đầu dòng kèm nội dung cụ thể.
-- Viết bằng tiếng Việt. Không thêm lời xin lỗi ở cuối.`;
+- Viết bằng tiếng Việt. Không thêm lời xin lỗi ở cuối.${
+      hasInvoiceCard
+        ? `
+- Giao diện ĐÃ hiển thị sẵn bảng chi tiết hoá đơn cho sinh viên. Chỉ viết 1 câu dẫn ngắn (ví dụ "Hoá đơn tháng X của phòng bạn như sau:") rồi dừng. TUYỆT ĐỐI không liệt kê lại từng khoản tiền, không viết lại con số tổng.`
+        : ''
+    }`;
   }
 
   // Cắt phần khung prompt bị model chép lại vào ĐẦU câu trả lời, ví dụ
@@ -478,12 +648,29 @@ Cách trả lời:
     return `Quá trình hoàn tất! Đã băm nhỏ và nạp thành công ${totalChunks} đoạn dữ liệu từ ${filePaths.length} file vào MongoDB.`;
   }
 
-  async streamChatResponse(userMessage: string, userId?: string): Promise<Observable<{ data: string }>> {
+  async streamChatResponse(
+    userMessage: string,
+    userId?: string,
+  ): Promise<Observable<ChatStreamEvent>> {
     const wantsPersonal = this.isPersonalQuery(userMessage);
-    const [knowledgeContext, personalContext] = await Promise.all([
-      this.searchKnowledge(userMessage),
+    const [knowledge, personalContext, invoiceCard] = await Promise.all([
+      this.searchKnowledgeDetailed(userMessage),
       wantsPersonal ? this.getPersonalContext(userId) : Promise.resolve(''),
+      this.getInvoiceCard(userMessage, userId),
     ]);
+
+    const { context: knowledgeContext, sources } = knowledge;
+
+    // Dòng trạng thái hiện trong khung chat lúc bot đang nghĩ. Nói đúng việc bot
+    // đang làm (đọc tài liệu / tra hồ sơ) thay vì "..." vô nghĩa.
+    const chunkCount = knowledgeContext ? knowledgeContext.split('\n\n---\n\n').length : 0;
+    const status = invoiceCard
+      ? 'Đang tra hoá đơn của bạn'
+      : personalContext
+        ? 'Đang tra hồ sơ của bạn'
+        : chunkCount > 0
+          ? `Đang đọc ${chunkCount} tài liệu KTX`
+          : 'Đang tra cứu';
 
     // Dùng chung systemPrompt/buildUserMessage với /ask để hai đường không lệch nhau
     const payload = {
@@ -496,7 +683,12 @@ Cách trả lời:
         { role: 'system', content: this.systemPrompt },
         {
           role: 'user',
-          content: this.buildUserMessage(userMessage, knowledgeContext, personalContext),
+          content: this.buildUserMessage(
+            userMessage,
+            knowledgeContext,
+            personalContext,
+            invoiceCard !== null,
+          ),
         },
       ],
       options: this.generateOptions,
@@ -519,8 +711,11 @@ Cách trả lời:
 
     const decoder = new TextDecoder();
 
-    return new Observable((subscriber) => {
+    return new Observable<ChatStreamEvent>((subscriber) => {
       let buffer = '';
+
+      subscriber.next({ type: 'status', status });
+      if (invoiceCard) subscriber.next({ type: 'invoice', invoice: invoiceCard });
 
       // Giữ lại phần ĐUÔI của văn bản chưa xả ra client, để khi stream kết thúc
       // có thể cắt câu xin lỗi thừa (stripTrailingApology) TRƯỚC khi nó kịp hiện
@@ -535,7 +730,7 @@ Cách trả lời:
 
       const emitUpTo = (target: number) => {
         if (target > emittedLen) {
-          subscriber.next({ data: fullText.slice(emittedLen, target) });
+          subscriber.next({ type: 'text', text: fullText.slice(emittedLen, target) });
           emittedLen = target;
         }
       };
@@ -564,8 +759,24 @@ Cách trả lời:
         // Lọc lời xin lỗi thừa trên TOÀN VĂN rồi xả nốt phần đuôi còn giữ
         const cleaned = this.stripTrailingApology(fullText);
         if (cleaned.length > emittedLen) {
-          subscriber.next({ data: cleaned.slice(emittedLen) });
+          subscriber.next({ type: 'text', text: cleaned.slice(emittedLen) });
         }
+
+        // Không tra được gì → báo thẳng cho giao diện để nó dựng khối "Không có
+        // trong tài liệu" kèm lối thoát (hỏi ban quản lý / câu hỏi thay thế),
+        // thay vì để sinh viên đọc một câu xin lỗi cụt lủn rồi bỏ đi.
+        const isNotFound =
+          !knowledgeContext &&
+          !personalContext &&
+          !invoiceCard &&
+          /chưa có thông tin/i.test(cleaned);
+
+        if (isNotFound) {
+          subscriber.next({ type: 'notfound', suggestions: this.getSuggestions(userMessage) });
+        } else if (sources.length > 0) {
+          subscriber.next({ type: 'sources', sources });
+        }
+
         subscriber.complete();
       };
 

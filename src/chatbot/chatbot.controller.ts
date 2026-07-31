@@ -41,7 +41,9 @@ export class ChatbotController {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
-        res.write(`data: ${JSON.stringify({ text: 'Bạn cần nhập nội dung tin nhắn.' })}\n\n`);
+        res.write(
+          `data: ${JSON.stringify({ type: 'text', text: 'Bạn cần nhập nội dung tin nhắn.' })}\n\n`,
+        );
         res.end();
         return;
       }
@@ -58,13 +60,16 @@ export class ChatbotController {
 
       const subscription = stream$.subscribe({
         next: (event) => {
-          const text = event?.data ?? '';
-          if (!text) return;
-          res.write(`data: ${JSON.stringify({ text })}\n\n`);
+          // Sự kiện chữ vẫn giữ nguyên khoá `text` như trước; các sự kiện mới
+          // (status/sources/invoice/notfound) phân biệt bằng khoá `type`.
+          if (event.type === 'text' && !event.text) return;
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
         },
         error: (err) => {
           console.error('Lỗi luồng stream:', err);
-          res.write(`data: ${JSON.stringify({ text: '\n\n[Đã có lỗi xảy ra trong quá trình sinh văn bản.]' })}\n\n`);
+          res.write(
+            `data: ${JSON.stringify({ type: 'text', text: '\n\n[Đã có lỗi xảy ra trong quá trình sinh văn bản.]' })}\n\n`,
+          );
           res.end();
         },
         complete: () => {
@@ -77,7 +82,9 @@ export class ChatbotController {
       });
     } catch (error) {
       console.error('Lỗi khởi tạo chatbot stream:', error);
-      res.write(`data: ${JSON.stringify({ text: 'Xin lỗi, hệ thống AI hiện không phản hồi. Vui lòng kiểm tra lại kết nối.' })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ type: 'text', text: 'Xin lỗi, hệ thống AI hiện không phản hồi. Vui lòng kiểm tra lại kết nối.' })}\n\n`,
+      );
       res.end();
     }
   }
