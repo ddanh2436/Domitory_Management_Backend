@@ -2,6 +2,7 @@ import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { Knowledge } from './knowledge.schema';
+import { ChatFeedback } from './chat-feedback.schema';
 import { User } from '../users/schemas/user.schema';
 import { Contract } from '../contracts/schemas/contract.schema';
 import { Invoice } from '../invoices/schemas/invoice.schema';
@@ -33,6 +34,12 @@ export type ChatStreamEvent =
   | { type: 'invoice'; invoice: InvoiceCard }
   | { type: 'notfound'; suggestions: string[] };
 
+// Một lượt hội thoại trước đó, do frontend gửi kèm để bot hiểu câu hỏi nối tiếp.
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 @Injectable()
 export class ChatbotService {
   private readonly logger = new Logger(ChatbotService.name);
@@ -49,6 +56,21 @@ export class ChatbotService {
   // Số đoạn tài liệu tối đa đưa vào ngữ cảnh. Câu hỏi tổng quát ("nội quy gồm những
   // gì") cần nhiều mục mới trả lời đủ — riêng file nội quy đã có 6 mục.
   private readonly searchLimit = Number(process.env.CHATBOT_SEARCH_LIMIT ?? 8);
+  // Ngưỡng điểm cho nhánh tìm theo từ khoá (Mongo textScore, KHÁC thang với điểm
+  // vector ở trên — đừng so hai con số này với nhau).
+  //
+  // Đo trên chính bộ 309 đoạn của dự án (scripts/calibrate-keyword.ts), dùng câu
+  // hỏi viết nguyên như sinh viên gõ:
+  //   7 câu đúng đề — điểm cao nhất mỗi câu: 2.13 … 5.57 (thấp nhất "đăng ký vé xe" 2.13)
+  //   5 câu lạc đề  — điểm cao nhất mỗi câu: 0.51 … 1.02 (cao nhất "nấu phở bò" 1.02)
+  // Khoảng trống 1.02 → 2.13, chọn 1.6 nằm giữa.
+  //
+  // Lưu ý textScore phụ thuộc vào thống kê kho tài liệu VÀ vào bộ lọc hư từ ở
+  // buildKeywordQuery — đổi một trong hai thì phải đo lại, đừng bê nguyên số này.
+  private readonly keywordMinScore = Number(process.env.CHATBOT_KEYWORD_MIN_SCORE ?? 1.6);
+  // Số chỗ trong searchLimit dành riêng cho nhánh từ khoá. Đặt 2/8: đủ để đoạn
+  // khớp chính xác lọt vào, vẫn để phần lớn ngữ cảnh cho vector quyết định.
+  private readonly keywordReservedSlots = Number(process.env.CHATBOT_KEYWORD_SLOTS ?? 2);
 
   private readonly personalKeywords = [
     'của tôi', 'của mình', 'của em', 'tôi đang', 'mình đang', 'em đang',
@@ -60,12 +82,79 @@ export class ChatbotService {
     'tôi ở phòng', 'tôi ở đâu', 'phòng nào',
   ];
 
+  // Số lượt hội thoại cũ đưa vào prompt. Giữ nhỏ vì model 3B: nhồi nhiều lượt cũ
+  // vừa chậm vừa khiến nó lẫn giữa câu hỏi cũ và câu hỏi hiện tại.
+  private readonly maxHistoryTurns = Number(process.env.CHATBOT_HISTORY_TURNS ?? 4);
+
+  // Câu xã giao: không cần tra tài liệu, trả lời thẳng cho nhanh. Trước đây phải
+  // dựa vào ngưỡng điểm vector để loại, giờ chặn sớm nên đỡ hẳn một lần gọi embedding.
+  // Cho phép kèm từ xưng hô phía sau ("chào bạn", "cảm ơn nhé") — sinh viên hiếm
+  // khi gõ đúng một từ trống không.
+  private readonly smallTalkPattern =
+    /^(chào|xin chào|hi|hello|hey|alo|ok|oke|okay|cảm ơn|cám ơn|thanks|thank you|tạm biệt|bye|good ?bye|ừ|uh|vâng|dạ)(\s+(bạn|ạ|à|nhé|nha|nhá|em|anh|chị|ad|admin))*[\s!.,?]*$/i;
+
+  // Dấu hiệu câu hỏi nối tiếp: bản thân nó không đủ nghĩa để đi tra tài liệu.
+  // "Còn tháng 6 thì sao?" — không có từ nào cho biết đang nói về hoá đơn.
+  //
+  // Cố tình KHÔNG bắt "thế nào" hay câu ngắn nói chung: rất nhiều câu hỏi đủ nghĩa
+  // cũng kết thúc bằng "như thế nào?" ("Quy định gửi xe như thế nào?") hoặc rất
+  // ngắn ("Giờ đóng cửa KTX?"). Ghép nhầm ngữ cảnh cũ vào những câu đó sẽ kéo
+  // truy xuất lệch hẳn sang chủ đề trước — hại nhiều hơn lợi.
+  private readonly followUpPattern =
+    /^(còn|thế còn|vậy còn|vậy thì|nếu vậy|thế nếu|nó|cái đó|cái này|vụ đó|trường hợp đó)\b|\bthì sao\b/i;
+
   constructor(
     @InjectModel(Knowledge.name) private knowledgeModel: Model<Knowledge>,
     @InjectModel(User.name) private userModel: Model<User>,
     @InjectModel(Contract.name) private contractModel: Model<Contract>,
     @InjectModel(Invoice.name) private invoiceModel: Model<Invoice>,
+    @InjectModel(ChatFeedback.name) private feedbackModel: Model<ChatFeedback>,
   ) {}
+
+  // Ghi nhận 👍/👎. Dùng upsert theo (user, question) để sinh viên đổi ý thì ghi đè
+  // chứ không tạo bản ghi mới.
+  async saveFeedback(input: {
+    userId: string;
+    question: string;
+    answer: string;
+    sources?: string[];
+    verdict: 'UP' | 'DOWN';
+    notFound?: boolean;
+  }): Promise<void> {
+    if (!isValidObjectId(input.userId)) {
+      throw new HttpException('Người dùng không hợp lệ.', HttpStatus.BAD_REQUEST);
+    }
+    if (input.verdict !== 'UP' && input.verdict !== 'DOWN') {
+      throw new HttpException('Phản hồi chỉ nhận UP hoặc DOWN.', HttpStatus.BAD_REQUEST);
+    }
+    if (!input.question?.trim()) {
+      throw new HttpException('Thiếu câu hỏi tương ứng.', HttpStatus.BAD_REQUEST);
+    }
+
+    await this.feedbackModel.updateOne(
+      { user: new Types.ObjectId(input.userId), question: input.question.trim().slice(0, 2000) },
+      {
+        $set: {
+          answer: (input.answer ?? '').slice(0, 8000),
+          sources: input.sources ?? [],
+          verdict: input.verdict,
+          notFound: input.notFound ?? false,
+        },
+      },
+      { upsert: true },
+    );
+  }
+
+  // Danh sách phản hồi cho quản trị viên. Ưu tiên 👎 lên đầu vì đó mới là thứ cần
+  // xử lý — 👍 chỉ để đối chiếu tỉ lệ.
+  async listFeedback(onlyNegative = false, limit = 100) {
+    return this.feedbackModel
+      .find(onlyNegative ? { verdict: 'DOWN' } : {})
+      .sort({ verdict: 1, updatedAt: -1 })
+      .limit(Math.min(limit, 500))
+      .populate('user', 'fullName mssv')
+      .lean();
+  }
 
   async getEmbedding(text: string): Promise<number[]> {
     try {
@@ -117,14 +206,82 @@ export class ChatbotService {
     });
   }
 
+  // Bỏ dấu tiếng Việt + viết thường. Dùng cho cả lúc nạp tài liệu và lúc truy vấn,
+  // nên hai bên luôn cùng một dạng chuẩn.
+  static normalizeVietnamese(text: string): string {
+    return (
+      text
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '') // bỏ dấu thanh và dấu mũ
+        .replace(/đ/gi, 'd')
+        .toLowerCase()
+        // Bỏ dấu câu, nếu không thì "nào?" không khớp với hư từ "nao" — mà dấu ?
+        // lại luôn nằm ở cuối câu hỏi, đúng chỗ cần lọc nhất.
+        .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    );
+  }
+
   async searchKnowledge(queryText: string): Promise<string> {
     return (await this.searchKnowledgeDetailed(queryText)).context;
+  }
+
+  // Nhánh tìm theo từ khoá, chạy song song với vector search.
+  // Bắt được hai loại câu mà vector hay trượt:
+  //   1. Gõ không dấu ("hoa don thang 7") — điểm tương đồng tụt dưới ngưỡng.
+  //   2. Từ khoá hiếm, chính xác ("1000W", mã phòng B4-207) — vector làm nhoè đi.
+  // Hư từ tiếng Việt (đã bỏ dấu). Index dùng default_language:'none' nên Mongo
+  // KHÔNG tự loại hư từ; không lọc tay thì "nấu phở bò thế nào?" được cộng điểm
+  // nhờ "the"/"nao" khớp khắp nơi và vượt ngưỡng dù hoàn toàn lạc đề.
+  //
+  // Cố tình KHÔNG có "cua" và "bi": bỏ dấu xong "của"/"cửa" trùng nhau, "bị"/"bị"
+  // trong "thiết bị" cũng vậy — mà "cửa" ("giờ đóng cửa") và "thiết bị" đều là từ
+  // khoá thật. Thà giữ lại vài hư từ còn hơn làm hỏng câu hỏi thật.
+  private static readonly stopWords = new Set([
+    'la', 'va', 'cho', 'co', 'khong', 'duoc', 'the', 'nao', 'gi', 'thi', 'ma',
+    'den', 'voi', 've', 'nay', 'do', 'hay', 'hoac', 'neu', 'khi', 'sau',
+    'truoc', 'tren', 'duoi', 'trong', 'boi', 'de', 'da', 'se', 'dang', 'cung',
+    'chi', 'rat', 'qua', 'toi', 'minh', 'em', 'ban', 'a', 'o', 'mot', 'nhung',
+    'nhu', 'sao', 'roi', 'nua', 'hon', 'moi', 'phai', 'bao', 'nhieu',
+  ]);
+
+  // Tách riêng và để public: script hiệu chuẩn ngưỡng phải dùng ĐÚNG cách tiền xử
+  // lý này, nếu không đo một đằng chạy một nẻo (đã từng dính lỗi đó).
+  static buildKeywordQuery(text: string): string {
+    return ChatbotService.normalizeVietnamese(text)
+      .split(' ')
+      .filter((word) => word.length > 0 && !ChatbotService.stopWords.has(word))
+      .join(' ');
+  }
+
+  private async searchByKeyword(
+    queryText: string,
+  ): Promise<{ _id: unknown; content: string; score: number }[]> {
+    const normalized = ChatbotService.buildKeywordQuery(queryText);
+    if (!normalized) return [];
+
+    try {
+      return await this.knowledgeModel
+        .find({ $text: { $search: normalized } }, { content: 1, score: { $meta: 'textScore' } })
+        .sort({ score: { $meta: 'textScore' } })
+        .limit(this.searchLimit)
+        .lean<{ _id: unknown; content: string; score: number }[]>();
+    } catch (error) {
+      // Chưa chạy lại ingest thì searchText còn rỗng / chưa có index — khi đó chỉ
+      // cần lặng lẽ bỏ qua nhánh này, vector search vẫn chạy bình thường.
+      this.logger.warn(`Tìm theo từ khoá thất bại (bỏ qua nhánh này): ${String(error)}`);
+      return [];
+    }
   }
 
   async searchKnowledgeDetailed(
     queryText: string,
   ): Promise<{ context: string; sources: string[] }> {
-    const queryVector = await this.getEmbedding(queryText);
+    const [queryVector, keywordHits] = await Promise.all([
+      this.getEmbedding(queryText),
+      this.searchByKeyword(queryText),
+    ]);
 
     const results = await this.knowledgeModel.aggregate([
       {
@@ -158,13 +315,91 @@ export class ChatbotService {
       );
     }
 
-    if (relevant.length === 0) return { context: '', sources: [] };
+    // Trộn hai nhánh: đoạn do vector chọn đứng trước (độ chính xác cao hơn), rồi
+    // bù thêm đoạn từ khoá chưa có, tới khi đủ searchLimit. Nhờ vậy câu hỏi bình
+    // thường giữ nguyên hành vi cũ, còn câu gõ không dấu / có từ khoá hiếm mới
+    // được nhánh từ khoá cứu.
+    const seen = new Set(relevant.map((r) => String(r._id)));
+    const keywordKept = keywordHits.filter(
+      (hit) => hit.score >= this.keywordMinScore && !seen.has(String(hit._id)),
+    );
 
-    const contents = relevant.map((r) => String(r.content));
+    if (keywordHits.length > 0) {
+      // Ba trạng thái, không phải hai: đoạn bị loại vì điểm thấp khác hẳn đoạn bị
+      // loại vì vector đã tìm ra rồi. Gộp chung sẽ khiến log tự mâu thuẫn (đếm 0
+      // nhưng vẫn in dòng "GIỮ") và dẫn người đọc đi chỉnh nhầm ngưỡng.
+      const lines = keywordHits.map((hit) => {
+        const state =
+          hit.score < this.keywordMinScore
+            ? 'loại '
+            : seen.has(String(hit._id))
+              ? 'trùng'
+              : 'THÊM ';
+        const preview = String(hit.content).replace(/\s+/g, ' ').slice(0, 70);
+        return `    ${state} ${hit.score.toFixed(4)}  ${preview}…`;
+      });
+      const overThreshold = keywordHits.filter((h) => h.score >= this.keywordMinScore).length;
+      this.logger.log(
+        `Nhánh từ khoá "${queryText}" — ${overThreshold}/${keywordHits.length} đoạn vượt ngưỡng ${this.keywordMinScore}, ` +
+          `trong đó ${keywordKept.length} đoạn là MỚI (vector chưa tìm ra):\n${lines.join('\n')}`,
+      );
+    }
+
+    // Dành sẵn chỗ cho nhánh từ khoá thay vì nối đuôi rồi cắt.
+    //
+    // Đo thực tế: với kho 309 đoạn hiện tại, vector luôn trả về đủ searchLimit đoạn
+    // vượt ngưỡng, nên nếu chỉ nối đuôi rồi slice thì đoạn từ khoá KHÔNG BAO GIỜ
+    // lọt vào — nhánh này thành code chết. Giữ lại vài chỗ để đoạn khớp từ khoá
+    // chính xác (mã phòng, "1000W") vẫn có đường vào ngữ cảnh.
+    const reserved = Math.min(keywordKept.length, this.keywordReservedSlots);
+    const merged = [
+      ...relevant.slice(0, this.searchLimit - reserved),
+      ...keywordKept.slice(0, reserved),
+    ];
+
+    if (merged.length === 0) return { context: '', sources: [] };
+
+    const contents = merged.map((r) => String(r.content));
     return {
       context: contents.join('\n\n---\n\n'),
       sources: this.extractSources(contents),
     };
+  }
+
+  private isSmallTalk(message: string): boolean {
+    return this.smallTalkPattern.test(message.trim());
+  }
+
+  // Cắt lịch sử về N lượt gần nhất và bỏ lượt rỗng. Frontend là nguồn không đáng
+  // tin (ai cũng gọi được API), nên chặn độ dài ở đây thay vì tin vào client.
+  private sanitizeHistory(history?: ChatTurn[]): ChatTurn[] {
+    if (!Array.isArray(history)) return [];
+
+    return history
+      .filter(
+        (turn) =>
+          turn &&
+          (turn.role === 'user' || turn.role === 'assistant') &&
+          typeof turn.content === 'string' &&
+          turn.content.trim().length > 0,
+      )
+      .slice(-this.maxHistoryTurns)
+      .map((turn) => ({ role: turn.role, content: turn.content.trim().slice(0, 2000) }));
+  }
+
+  // Câu hỏi nối tiếp ("còn tháng 6 thì sao?") không đủ nghĩa để tra vector — ghép
+  // thêm câu hỏi trước của sinh viên để truy xuất đúng chủ đề. Chỉ ghép cho khâu
+  // TÌM KIẾM; prompt vẫn nhận câu hỏi nguyên văn để bot không trả lời lạc sang câu cũ.
+  //
+  // Cách này thay cho việc gọi model viết lại câu hỏi: rẻ hơn hẳn (0 lượt suy luận)
+  // và không có rủi ro model viết lại sai ý.
+  buildSearchQuery(message: string, history: ChatTurn[]): string {
+    const trimmed = message.trim();
+    if (!this.followUpPattern.test(trimmed)) return trimmed;
+
+    const lastUserQuestion = [...history].reverse().find((turn) => turn.role === 'user')?.content;
+
+    return lastUserQuestion ? `${lastUserQuestion} ${trimmed}` : trimmed;
   }
 
   private isPersonalQuery(message: string): boolean {
@@ -290,10 +525,16 @@ export class ChatbotService {
   // Tìm hoá đơn mà câu hỏi nhắc tới. "Hoá đơn tháng 7 của tôi bao nhiêu?" → hoá đơn
   // tháng 7 của phòng sinh viên đang ở; không nêu tháng thì lấy kỳ gần nhất.
   // Trả về số liệu thô để giao diện tự kẻ bảng — model không đụng vào con số nào.
-  async getInvoiceCard(message: string, userId?: string): Promise<InvoiceCard | null> {
+  async getInvoiceCard(
+    message: string,
+    searchQuery: string,
+    userId?: string,
+  ): Promise<InvoiceCard | null> {
     try {
       if (!userId || !isValidObjectId(userId)) return null;
-      if (!this.isInvoiceQuery(message)) return null;
+      // Xét trên câu đã ghép ngữ cảnh: "còn tháng 6 thì sao?" tự nó không có chữ
+      // "hoá đơn" nào, phải nhìn cả câu hỏi trước mới biết đang nói về hoá đơn.
+      if (!this.isInvoiceQuery(searchQuery)) return null;
 
       const user: any = await this.userModel
         .findById(userId)
@@ -303,8 +544,13 @@ export class ChatbotService {
 
       if (!user?.room?._id) return null;
 
-      const monthMatch = message.match(/tháng\s*(\d{1,2})/i);
-      const yearMatch = message.match(/năm\s*(\d{4})|\/\s*(\d{4})/i);
+      // Ưu tiên tháng nêu trong câu HIỆN TẠI. Nếu lấy từ câu đã ghép thì
+      // "Hoá đơn tháng 7... còn tháng 6 thì sao?" sẽ khớp nhầm tháng 7.
+      const monthMatch =
+        message.match(/tháng\s*(\d{1,2})/i) ?? searchQuery.match(/tháng\s*(\d{1,2})/i);
+      const yearMatch =
+        message.match(/năm\s*(\d{4})|\/\s*(\d{4})/i) ??
+        searchQuery.match(/năm\s*(\d{4})|\/\s*(\d{4})/i);
 
       const filter: Record<string, unknown> = { room: user.room._id };
       if (monthMatch) {
@@ -369,7 +615,8 @@ export class ChatbotService {
   // Model instruct được huấn luyện theo định dạng system/user, nên đặt đúng khe
   // giúp tuân thủ tốt hơn hẳn so với nhồi tất cả vào một khối văn bản.
   private readonly systemPrompt = `Bạn là trợ lý ảo Dormify của hệ thống ký túc xá, chỉ giao tiếp bằng tiếng Việt.
-Nguyên tắc: chỉ dùng thông tin trong tài liệu người dùng cung cấp, không bịa thêm. Toàn bộ câu trả lời phải viết bằng tiếng Việt, không được chèn từ của ngôn ngữ khác.`;
+Nguyên tắc: chỉ dùng thông tin trong tài liệu người dùng cung cấp, không bịa thêm. Toàn bộ câu trả lời phải viết bằng tiếng Việt, không được chèn từ của ngôn ngữ khác.
+Các lượt hội thoại trước chỉ dùng để hiểu câu hỏi hiện tại đang nói về chủ đề gì. Luôn trả lời ĐÚNG câu hỏi mới nhất, không trả lời lại câu hỏi cũ.`;
 
   // Thông điệp `user`: dữ liệu + câu hỏi + hướng dẫn trình bày.
   // Hướng dẫn định dạng đặt ngay cạnh câu hỏi (thay vì trong system) cho kết quả
@@ -466,13 +713,54 @@ Cách trả lời:
     num_predict: 1536,
   };
 
-  async getChatResponse(userMessage: string, userId?: string): Promise<string> {
+  // Gom toàn bộ khâu chuẩn bị ngữ cảnh vào một chỗ để /ask và /stream không lệch
+  // nhau — đây là điều file này vẫn cố giữ từ trước.
+  private async prepareContext(userMessage: string, history: ChatTurn[], userId?: string) {
+    // Câu xã giao: bỏ hẳn khâu truy xuất. Tiết kiệm một lần gọi embedding và một
+    // lần truy vấn Mongo cho mỗi lời "chào bạn".
+    if (this.isSmallTalk(userMessage)) {
+      return {
+        searchQuery: userMessage,
+        knowledgeContext: '',
+        sources: [] as string[],
+        personalContext: '',
+        invoiceCard: null as InvoiceCard | null,
+      };
+    }
+
+    const searchQuery = this.buildSearchQuery(userMessage, history);
+    if (searchQuery !== userMessage) {
+      this.logger.log(`Câu hỏi nối tiếp — tra cứu theo: "${searchQuery}"`);
+    }
+
+    const wantsPersonal = this.isPersonalQuery(searchQuery);
+    const [knowledge, personalContext, invoiceCard] = await Promise.all([
+      this.searchKnowledgeDetailed(searchQuery),
+      wantsPersonal ? this.getPersonalContext(userId) : Promise.resolve(''),
+      this.getInvoiceCard(userMessage, searchQuery, userId),
+    ]);
+
+    return {
+      searchQuery,
+      knowledgeContext: knowledge.context,
+      sources: knowledge.sources,
+      personalContext,
+      invoiceCard,
+    };
+  }
+
+  async getChatResponse(
+    userMessage: string,
+    userId?: string,
+    rawHistory?: ChatTurn[],
+  ): Promise<string> {
     try {
-      const wantsPersonal = this.isPersonalQuery(userMessage);
-      const [knowledgeContext, personalContext] = await Promise.all([
-        this.searchKnowledge(userMessage),
-        wantsPersonal ? this.getPersonalContext(userId) : Promise.resolve(''),
-      ]);
+      const history = this.sanitizeHistory(rawHistory);
+      const { knowledgeContext, personalContext, invoiceCard } = await this.prepareContext(
+        userMessage,
+        history,
+        userId,
+      );
 
       // Dùng /api/chat (không phải /api/generate): đặt quy tắc vào khe `system`
       // và dữ liệu + câu hỏi vào khe `user`, đúng định dạng model instruct được
@@ -486,9 +774,15 @@ Cách trả lời:
           keep_alive: '10m',
           messages: [
             { role: 'system', content: this.systemPrompt },
+            ...history,
             {
               role: 'user',
-              content: this.buildUserMessage(userMessage, knowledgeContext, personalContext),
+              content: this.buildUserMessage(
+                userMessage,
+                knowledgeContext,
+                personalContext,
+                invoiceCard !== null,
+              ),
             },
           ],
           options: this.generateOptions,
@@ -637,6 +931,9 @@ Cách trả lời:
             title: docTitle,
             content: chunk.content,
             embedding,
+            // Bản bỏ dấu cho nhánh tìm theo từ khoá — phải sinh ở đây, cùng lúc
+            // với embedding, để hai cách tìm luôn nhìn thấy đúng một tập tài liệu.
+            searchText: ChatbotService.normalizeVietnamese(chunk.embedText),
           });
           totalChunks++;
         } catch (err) {
@@ -651,15 +948,14 @@ Cách trả lời:
   async streamChatResponse(
     userMessage: string,
     userId?: string,
+    rawHistory?: ChatTurn[],
   ): Promise<Observable<ChatStreamEvent>> {
-    const wantsPersonal = this.isPersonalQuery(userMessage);
-    const [knowledge, personalContext, invoiceCard] = await Promise.all([
-      this.searchKnowledgeDetailed(userMessage),
-      wantsPersonal ? this.getPersonalContext(userId) : Promise.resolve(''),
-      this.getInvoiceCard(userMessage, userId),
-    ]);
-
-    const { context: knowledgeContext, sources } = knowledge;
+    const history = this.sanitizeHistory(rawHistory);
+    const { knowledgeContext, sources, personalContext, invoiceCard } = await this.prepareContext(
+      userMessage,
+      history,
+      userId,
+    );
 
     // Dòng trạng thái hiện trong khung chat lúc bot đang nghĩ. Nói đúng việc bot
     // đang làm (đọc tài liệu / tra hồ sơ) thay vì "..." vô nghĩa.
@@ -681,6 +977,9 @@ Cách trả lời:
       keep_alive: '10m',
       messages: [
         { role: 'system', content: this.systemPrompt },
+        // Lượt cũ đặt giữa system và câu hỏi hiện tại — nhờ đó bot hiểu được
+        // "còn tháng 6 thì sao?" mà không cần nhắc lại chủ đề.
+        ...history,
         {
           role: 'user',
           content: this.buildUserMessage(
