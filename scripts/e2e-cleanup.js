@@ -13,6 +13,7 @@ async function main() {
   const roomIds = rooms.map((r) => r._id);
 
   const out = {};
+  out.feedbacks = (await db.collection("feedbacks").deleteMany({ student: { $in: userIds } })).deletedCount;
   out.notifications = (await db.collection("notifications").deleteMany({
     $or: [{ recipient: { $in: userIds } }, { message: /E2E/ }],
   })).deletedCount;
