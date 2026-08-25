@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import * as bcrypt from 'bcrypt';
 import {
   User,
   UserAccessStatus,
@@ -40,6 +41,29 @@ export class UsersService {
     'cccd',
     'avatar',
   ] as const;
+
+  // Đổi mật khẩu khi đã đăng nhập — bắt buộc xác minh đúng mật khẩu hiện tại
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ) {
+    const user = await this.userModel
+      .findById(userId)
+      .select('+passwordHash');
+    if (!user) throw new NotFoundException('Không tìm thấy người dùng');
+
+    const isValid = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!isValid) {
+      throw new BadRequestException('Mật khẩu hiện tại không đúng');
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    user.passwordHash = await bcrypt.hash(newPassword, salt);
+    await user.save();
+
+    return { message: 'Đổi mật khẩu thành công' };
+  }
 
   async updateProfile(userId: string, updateData: Partial<User>) {
     // Chỉ nhặt đúng các trường trong whitelist, bỏ qua mọi trường khác
