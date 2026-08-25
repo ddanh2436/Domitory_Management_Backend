@@ -3,6 +3,7 @@ import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
+import { ChangePasswordDto } from '../auth/dto/auth.dto';
 
 @Controller('api/users')
 @UseGuards(JwtAuthGuard, RolesGuard) 
@@ -19,6 +20,17 @@ export class UsersController {
   updateProfile(@Request() req: any, @Body() updateData: any) {
     const userId = req.user.sub;
     return this.usersService.updateProfile(userId, updateData);
+  }
+
+  // Đổi mật khẩu khi đã đăng nhập (khác với flow quên mật khẩu qua email)
+  @Patch('change-password')
+  changePassword(@Request() req: any, @Body() body: ChangePasswordDto) {
+    const userId = req.user.sub;
+    return this.usersService.changePassword(
+      userId,
+      body.currentPassword,
+      body.newPassword,
+    );
   }
 
   @Get('students')
