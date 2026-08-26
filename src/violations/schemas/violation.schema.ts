@@ -26,13 +26,15 @@ export class Violation {
   @Prop()
   scoreAfter?: number;
 
-  // Trạng thái vòng đời khiếu nại/thu hồi
+  // Trạng thái vòng đời khiếu nại/thu hồi.
+  // type: String khai báo tường minh vì reflection không suy ra được string enum.
   @Prop({
+    type: String,
     required: true,
     enum: Object.values(ViolationStatus),
     default: ViolationStatus.ACTIVE,
   })
-  status!: string;
+  status!: ViolationStatus;
 
   // Lý do sinh viên khiếu nại
   @Prop({ maxlength: 500 })
