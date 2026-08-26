@@ -18,7 +18,23 @@ describe('ViolationsService', () => {
   let userModel: any;
 
   // Doc vi phạm giả lập, có save() để kiểm tra thay đổi trạng thái
-  const makeViolation = (over: Record<string, any> = {}) => ({
+  // Các field ban quản lý ghi thêm trong lúc khiếu nại/duyệt là optional,
+  // khai báo tường minh để test đọc được v.appealReason / v.reviewNote
+  type MockViolation = {
+    _id: string;
+    student: string;
+    reason: string;
+    points: number;
+    status: ViolationStatus;
+    appealReason?: string;
+    appealedAt?: Date;
+    reviewNote?: string;
+    reviewedBy?: unknown;
+    reviewedAt?: Date;
+    save: jest.Mock;
+  };
+
+  const makeViolation = (over: Record<string, any> = {}): MockViolation => ({
     _id: VIOLATION_ID,
     student: STUDENT_ID, // .toString() trả về chính chuỗi này
     reason: 'Về ký túc xá quá giờ',
